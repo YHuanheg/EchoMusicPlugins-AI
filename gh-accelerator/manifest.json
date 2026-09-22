@@ -1,0 +1,17 @@
+{
+  "id": "gh-accelerator",
+  "name": "GitHub 加速器",
+  "version": "1.2.0",
+  "description": "为 EchoMusic 的更新与在线插件下载挑选最快的 GitHub 加速线路：多线路实测排序、一键写入「GitHub 加速地址」、故障回退，并提供 Xget 多平台链接转换。",
+  "author": "YHuanheg",
+  "icon": "icon.svg",
+  "main": "index.js",
+  "style": "style.css",
+  "capabilities": {
+    "unrestrictedNetwork": true,
+    "webServer": true
+  },
+  "requires": {
+    "echoMusicVersion": ">=2.3.0"
+  }
+}

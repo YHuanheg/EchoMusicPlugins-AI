@@ -1,0 +1,20 @@
+{
+  "id": "kugou-daily-vip",
+  "name": "概念版每日领VIP",
+  "version": "1.1.0",
+  "description": "每天自动领取酷狗概念版畅听VIP：听歌领取 + 广告领取（最多8次，带倒计时进度）+ 天天签到领取，可选自动升级概念版VIP，跨天自动补领并记录领取历史。入口在软件顶部⭐。",
+  "author": "YHuanheg",
+  "icon": "icon.svg",
+  "main": "index.js",
+  "runtime": {
+    "miniPlayer": false,
+    "desktopLyric": false
+  },
+  "requires": {
+    "echoMusicVersion": ">=2.3.2-beta.2"
+  },
+  "capabilities": {
+    "unrestrictedNetwork": true,
+    "kugouVerification": true
+  }
+}

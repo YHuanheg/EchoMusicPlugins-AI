@@ -1,0 +1,45 @@
+# 临时/调试产物
+.workbuddy/
+_probe*.txt
+_probe*.mjs
+_probe*.py
+_*_out.txt
+_cleanup*.txt
+ls_*.txt
+
+# 依赖与系统文件
+node_modules/
+Thumbs.db
+.DS_Store
+*.log
+
+# --- 发布安全护栏（由 echomusic-plugin-dev/scripts/scrub.mjs 维护，勿手改）---
+.workbuddy/
+*_publish-quarantine/
+.env
+.env.*
+*.local.json
+*.secret.json
+credentials*.json
+secrets*.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+.npmrc
+.netrc
+_netrc
+*.token
+*.session
+*.har
+*.trace
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.log
+*.bak
+Thumbs.db
+.DS_Store
+# --- 护栏结束 ---

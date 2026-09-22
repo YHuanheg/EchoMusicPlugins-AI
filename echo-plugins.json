@@ -1,0 +1,49 @@
+{
+  "name": "EchoMusic AI 插件源",
+  "homepage": "https://github.com/YHuanheg/EchoMusicPlugins-AI",
+  "plugins": [
+    {
+      "id": "gh-accelerator",
+      "path": "gh-accelerator",
+      "repo": "https://github.com/YHuanheg/EchoMusicPlugins-AI",
+      "homepage": "https://github.com/YHuanheg/EchoMusicPlugins-AI/tree/main/gh-accelerator",
+      "tags": [
+        "github",
+        "accelerator",
+        "network",
+        "proxy",
+        "xget",
+        "toolkit"
+      ]
+    },
+    {
+      "id": "kugou-daily-vip",
+      "path": "kugou-daily-vip",
+      "repo": "https://github.com/YHuanheg/EchoMusicPlugins-AI",
+      "homepage": "https://github.com/YHuanheg/EchoMusicPlugins-AI/tree/main/kugou-daily-vip",
+      "tags": [
+        "kugou",
+        "concept",
+        "vip",
+        "daily",
+        "auto",
+        "checkin",
+        "countdown"
+      ]
+    },
+    {
+      "id": "kugou-recommend",
+      "path": "kugou-recommend",
+      "repo": "https://github.com/YHuanheg/EchoMusicPlugins-AI",
+      "homepage": "https://github.com/YHuanheg/EchoMusicPlugins-AI/tree/main/kugou-recommend",
+      "tags": [
+        "kugou",
+        "recommend",
+        "discover",
+        "radio",
+        "fm",
+        "playlist"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "id": "kugou-recommend",
+  "name": "推荐电台",
+  "version": "1.2.1",
+  "description": "多源音乐推荐电台：频道漫游、每日推荐、猜你喜欢、曲风推荐、AI 推荐、新歌速递、每日历史、听歌排行。支持一键播放、自动续杯、喜欢与不感兴趣、跨源去重，并内置推荐源健康检查。",
+  "author": "YHuanheg",
+  "icon": "icon.svg",
+  "main": "index.js",
+  "style": "style.css",
+  "runtime": {
+    "miniPlayer": false,
+    "desktopLyric": false
+  },
+  "capabilities": {
+    "unrestrictedNetwork": true,
+    "kugouVerification": true
+  },
+  "requires": {
+    "echoMusicVersion": ">=2.3.2-beta.2"
+  }
+}

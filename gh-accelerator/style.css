@@ -1,0 +1,802 @@
+/* GitHub 加速器 —— 全部使用宿主主题变量，自动跟随深浅色与主题色 */
+
+/* 宿主把插件页包在 .plugin-page-host（h-full min-h-0 overflow-hidden）里：
+   它只负责裁剪、自身不滚动。所以页面根元素必须自己成为滚动容器；
+   同时不能用 flex 布局（子项 flex-shrink 默认 1，超出时会被压扁而不是溢出，就看不到滚动条）。 */
+.gha {
+  --gha-radius: 14px;
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: block;
+  padding: 18px 22px 140px;
+  box-sizing: border-box;
+  color: var(--color-text-main, #1f2937);
+  font-family: var(--font-sans, inherit);
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--color-text-main, #888) 26%, transparent) transparent;
+  overscroll-behavior: contain;
+}
+
+/* 内容居中限宽，滚动条仍贴在容器右缘 */
+.gha > * {
+  max-width: 1040px;
+  margin: 0 auto;
+}
+
+.gha > * + * {
+  margin-top: 18px;
+}
+
+.gha *,
+.gha *::before,
+.gha *::after {
+  box-sizing: border-box;
+}
+
+/* ---------- 顶部 ---------- */
+
+.gha-hero {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px 20px;
+  border-radius: var(--gha-radius);
+  border: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.08));
+  background: var(--color-bg-elevated, rgba(127, 127, 127, 0.06));
+}
+
+.gha-hero-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 20px;
+  font-weight: 650;
+  letter-spacing: -0.2px;
+  margin: 0;
+}
+
+.gha-hero-desc {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--color-text-secondary, #6b7280);
+}
+
+.gha-hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+/* 页内联开关（与设置面板共用同一个配置项）
+   开启时整块染主题色 + 显示「已开启」标签，避免只看小方块看不出状态 */
+.gha-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: var(--control-muted-bg, rgba(127, 127, 127, 0.09));
+  font-size: 12.5px;
+  color: var(--color-text-secondary, #6b7280);
+  user-select: none;
+  transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+}
+
+.gha-check[data-on='true'] {
+  background: color-mix(in srgb, var(--color-primary, #31cfa1) 13%, transparent);
+  border-color: color-mix(in srgb, var(--color-primary, #31cfa1) 45%, transparent);
+  color: var(--color-text-main, #1f2937);
+}
+
+.gha-check-label {
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* ---------- 卡片 ---------- */
+
+.gha-card {
+  border-radius: var(--gha-radius);
+  border: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.08));
+  background: var(--color-bg-card, var(--color-bg-elevated, rgba(127, 127, 127, 0.05)));
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.gha-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.gha-card-title {
+  font-size: 15px;
+  font-weight: 620;
+  margin: 0;
+}
+
+.gha-card-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--color-text-secondary, #6b7280);
+  line-height: 1.6;
+}
+
+/* ---------- 键值行 ---------- */
+
+.gha-kv {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  font-size: 13px;
+  padding: 7px 0;
+  border-bottom: 1px dashed var(--border-subtle, rgba(0, 0, 0, 0.07));
+}
+
+.gha-kv:last-child {
+  border-bottom: none;
+}
+
+.gha-kv-key {
+  color: var(--color-text-secondary, #6b7280);
+  flex-shrink: 0;
+}
+
+.gha-kv-val {
+  text-align: right;
+  word-break: break-all;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+}
+
+/* ---------- 按钮 ---------- */
+
+.gha-btn {
+  appearance: none;
+  border: 1px solid var(--control-border, var(--border-subtle, rgba(0, 0, 0, 0.1)));
+  background: var(--control-bg, transparent);
+  color: var(--color-text-main, #1f2937);
+  border-radius: 10px;
+  padding: 7px 13px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.3;
+  cursor: pointer;
+  transition: background 0.16s ease, border-color 0.16s ease, transform 0.16s ease, opacity 0.16s ease;
+  white-space: nowrap;
+}
+
+.gha-btn:hover:not(:disabled) {
+  background: var(--control-hover-bg, rgba(127, 127, 127, 0.12));
+}
+
+.gha-btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.gha-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.gha-btn-primary {
+  background: var(--color-primary, #31cfa1);
+  border-color: transparent;
+  color: #fff;
+}
+
+.gha-btn-primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-primary, #31cfa1) 86%, #000);
+}
+
+.gha-btn-danger {
+  color: var(--color-danger, #ef4444);
+  border-color: color-mix(in srgb, var(--color-danger, #ef4444) 40%, transparent);
+  background: color-mix(in srgb, var(--color-danger, #ef4444) 10%, transparent);
+}
+
+.gha-btn-sm {
+  padding: 4px 9px;
+  font-size: 12px;
+  border-radius: 8px;
+}
+
+/* ---------- 徽章 ---------- */
+
+.gha-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 520;
+  line-height: 1.6;
+  background: var(--control-muted-bg, rgba(127, 127, 127, 0.12));
+  color: var(--color-text-secondary, #6b7280);
+}
+
+.gha-badge-primary {
+  background: color-mix(in srgb, var(--color-primary, #31cfa1) 16%, transparent);
+  color: var(--color-primary, #31cfa1);
+}
+
+.gha-badge-warn {
+  background: color-mix(in srgb, var(--color-warning, #f59e0b) 18%, transparent);
+  color: var(--color-warning, #f59e0b);
+}
+
+/* ---------- 线路列表 ---------- */
+
+.gha-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.gha-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 11px;
+  border: 1px solid transparent;
+  background: var(--control-muted-bg, rgba(127, 127, 127, 0.07));
+  transition: border-color 0.18s ease, background 0.18s ease;
+}
+
+.gha-row-active {
+  border-color: var(--color-primary, #31cfa1);
+  background: color-mix(in srgb, var(--color-primary, #31cfa1) 9%, transparent);
+}
+
+.gha-row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.gha-row-name {
+  font-size: 13px;
+  font-weight: 560;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.gha-row-host {
+  font-size: 11.5px;
+  color: var(--color-text-secondary, #6b7280);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  word-break: break-all;
+}
+
+.gha-row-side {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.gha-metric {
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-secondary, #6b7280);
+  min-width: 66px;
+  text-align: right;
+}
+
+.gha-metric-good {
+  color: var(--color-primary, #31cfa1);
+}
+
+.gha-metric-bad {
+  color: var(--color-danger, #ef4444);
+}
+
+.gha-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--control-border, rgba(127, 127, 127, 0.4));
+}
+
+.gha-dot-ok {
+  background: var(--color-primary, #31cfa1);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-primary, #31cfa1) 20%, transparent);
+}
+
+.gha-dot-bad {
+  background: var(--color-danger, #ef4444);
+}
+
+.gha-dot-busy {
+  background: var(--color-warning, #f59e0b);
+  animation: gha-pulse 1s ease-in-out infinite;
+}
+
+@keyframes gha-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+
+/* ---------- 表单 ---------- */
+
+.gha-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.gha-label {
+  font-size: 12px;
+  color: var(--color-text-secondary, #6b7280);
+}
+
+.gha-input,
+.gha-textarea,
+.gha-select {
+  width: 100%;
+  padding: 8px 11px;
+  border-radius: 10px;
+  border: 1px solid var(--control-border, var(--border-subtle, rgba(0, 0, 0, 0.12)));
+  background: var(--color-bg-primary, transparent);
+  color: var(--color-text-main, #1f2937);
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.gha-input:focus,
+.gha-textarea:focus,
+.gha-select:focus {
+  border-color: var(--color-primary, #31cfa1);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-primary, #31cfa1) 18%, transparent);
+}
+
+.gha-textarea {
+  min-height: 104px;
+  resize: vertical;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.gha-inline {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.gha-inline > .gha-input {
+  flex: 1;
+  min-width: 180px;
+}
+
+.gha-out {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--control-muted-bg, rgba(127, 127, 127, 0.09));
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.7;
+  word-break: break-all;
+  color: var(--color-text-main, #1f2937);
+}
+
+.gha-out-ok {
+  background: color-mix(in srgb, var(--color-primary, #31cfa1) 12%, transparent);
+  color: var(--color-primary, #31cfa1);
+}
+
+.gha-placeholder {
+  font-size: 12.5px;
+  color: var(--color-text-secondary, #6b7280);
+  padding: 8px 0;
+}
+
+/* ---------- 统计 ---------- */
+
+.gha-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(104px, 1fr));
+  gap: 10px;
+}
+
+.gha-stat {
+  border-radius: 11px;
+  padding: 12px 14px;
+  background: var(--control-muted-bg, rgba(127, 127, 127, 0.09));
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.gha-stat-num {
+  font-size: 21px;
+  font-weight: 660;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+}
+
+.gha-stat-cap {
+  font-size: 11.5px;
+  color: var(--color-text-secondary, #6b7280);
+}
+
+/* ---------- 提示条 ---------- */
+
+.gha-note {
+  border-radius: 11px;
+  padding: 11px 13px;
+  font-size: 12.5px;
+  line-height: 1.65;
+  background: color-mix(in srgb, var(--color-warning, #f59e0b) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-warning, #f59e0b) 30%, transparent);
+  color: var(--color-text-main, #1f2937);
+}
+
+.gha-note-ok {
+  background: color-mix(in srgb, var(--color-primary, #31cfa1) 12%, transparent);
+  border-color: color-mix(in srgb, var(--color-primary, #31cfa1) 32%, transparent);
+}
+
+.gha-note code {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--control-muted-bg, rgba(127, 127, 127, 0.16));
+}
+
+.gha-progress {
+  height: 4px;
+  width: 100%;
+  border-radius: 999px;
+  background: var(--control-muted-bg, rgba(127, 127, 127, 0.16));
+  overflow: hidden;
+}
+
+.gha-progress-bar {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--color-primary, #31cfa1);
+  transition: width 0.25s ease;
+}
+
+.gha-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.gha-switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 12px;
+  border-radius: 11px;
+  background: var(--control-muted-bg, rgba(127, 127, 127, 0.07));
+  border: 1px solid transparent;
+  transition: background 0.18s ease, border-color 0.18s ease;
+}
+
+.gha-switch-row-on {
+  background: color-mix(in srgb, var(--color-primary, #31cfa1) 9%, transparent);
+  border-color: color-mix(in srgb, var(--color-primary, #31cfa1) 32%, transparent);
+}
+
+.gha-switch-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.gha-switch-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  font-weight: 520;
+}
+
+.gha-switch-desc {
+  font-size: 11.5px;
+  color: var(--color-text-secondary, #6b7280);
+  line-height: 1.55;
+}
+
+/* ---------- 开关与状态标签 ---------- */
+
+.gha-switch {
+  position: relative;
+  flex: 0 0 auto;
+  display: inline-block;
+  width: 38px;
+  height: 21px;
+  border-radius: 999px;
+  background: var(--control-border, rgba(127, 127, 127, 0.4));
+  cursor: pointer;
+  outline: none;
+  transition: background 0.18s ease, box-shadow 0.18s ease;
+}
+
+.gha-switch:hover {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-primary, #31cfa1) 18%, transparent);
+}
+
+.gha-switch:focus-visible {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-primary, #31cfa1) 35%, transparent);
+}
+
+.gha-switch[data-on='true'] {
+  background: var(--color-primary, #31cfa1);
+}
+
+.gha-switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  transition: transform 0.18s ease;
+}
+
+.gha-switch[data-on='true'] .gha-switch-knob {
+  transform: translateX(17px);
+}
+
+.gha-state-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.65;
+  background: var(--control-muted-bg, rgba(127, 127, 127, 0.14));
+  color: var(--color-text-secondary, #6b7280);
+}
+
+.gha-state-chip-on {
+  background: color-mix(in srgb, var(--color-primary, #31cfa1) 18%, transparent);
+  color: var(--color-primary, #31cfa1);
+}
+
+/* ---------- 在线插件界面（插件市场）里的状态条 ---------- */
+
+.gha-mkt {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.08));
+  background: var(--color-bg-card, var(--control-muted-bg, rgba(127, 127, 127, 0.06)));
+  color: var(--color-text-main, #1f2937);
+  font-family: var(--font-sans, inherit);
+  font-size: 13px;
+  box-sizing: border-box;
+}
+
+.gha-mkt-on {
+  border-color: color-mix(in srgb, var(--color-primary, #31cfa1) 40%, transparent);
+  background: color-mix(in srgb, var(--color-primary, #31cfa1) 9%, transparent);
+}
+
+.gha-mkt-warn {
+  border-color: color-mix(in srgb, var(--color-warning, #f59e0b) 42%, transparent);
+  background: color-mix(in srgb, var(--color-warning, #f59e0b) 10%, transparent);
+}
+
+.gha-mkt-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.gha-mkt-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.gha-mkt-speed {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--color-primary, #31cfa1);
+  font-variant-numeric: tabular-nums;
+}
+
+.gha-mkt-sub {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--color-text-secondary, #6b7280);
+  word-break: break-all;
+}
+
+.gha-mkt-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* ---------- 刷新拉取进度条 ---------- */
+
+.gha-mkt-progress {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border-subtle, rgba(0, 0, 0, 0.1));
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.gha-mkt-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.gha-mkt-progress-phase {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--color-text-main, #1f2937);
+}
+
+.gha-mkt-progress-pct {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--color-primary, #31cfa1);
+  font-variant-numeric: tabular-nums;
+}
+
+.gha-mkt-bar {
+  position: relative;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--control-muted-bg, rgba(127, 127, 127, 0.18));
+  overflow: hidden;
+}
+
+.gha-mkt-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--color-primary, #31cfa1);
+  transition: width 0.28s ease;
+}
+
+.gha-mkt-progress[data-active='true'] .gha-mkt-bar-fill {
+  background-image: linear-gradient(
+    90deg,
+    var(--color-primary, #31cfa1) 0%,
+    color-mix(in srgb, var(--color-primary, #31cfa1) 55%, transparent) 50%,
+    var(--color-primary, #31cfa1) 100%
+  );
+  background-size: 200% 100%;
+  animation: gha-bar-flow 1.2s linear infinite;
+}
+
+@keyframes gha-bar-flow {
+  from {
+    background-position: 0% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+.gha-mkt-progress-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--color-text-secondary, #6b7280);
+  font-variant-numeric: tabular-nums;
+}
+
+.gha-mkt-progress-meta > span {
+  white-space: nowrap;
+}
+
+.gha-mkt-progress-err {
+  color: var(--color-warning, #f59e0b);
+}
+
+/* 小号旋转指示器：进度进行中时替代状态圆点 */
+.gha-spin {
+  width: 9px;
+  height: 9px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 1.5px solid color-mix(in srgb, var(--color-primary, #31cfa1) 28%, transparent);
+  border-top-color: var(--color-primary, #31cfa1);
+  animation: gha-spin 0.7s linear infinite;
+}
+
+@keyframes gha-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.gha-section-title {
+  margin: 18px 0 2px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.08));
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--color-text-main, #1f2937);
+}
+
+/* 「刷新」按钮接管层：透明命中区，盖在宿主按钮上，视觉上完全不可见。
+   只在设置里打开接管后才会被注入；关闭时会被整块移除，宿主 DOM 零残留。 */
+.gha-takeover-hit {
+  border-radius: inherit;
+  background: transparent;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.gha-takeover-hit:focus-visible {
+  outline: 2px solid var(--color-primary, #31cfa1);
+  outline-offset: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gha-spin {
+    animation-duration: 2s;
+  }
+
+  .gha-mkt-progress[data-active='true'] .gha-mkt-bar-fill {
+    animation: none;
+  }
+}
+
+@media (width <= 860px) {
+  .gha-mkt {
+    flex-wrap: wrap;
+  }
+
+  .gha-mkt-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+}

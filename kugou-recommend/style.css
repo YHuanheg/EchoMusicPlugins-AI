@@ -1,0 +1,672 @@
+/* ==========================================================================
+   推荐电台 (kugou-recommend)
+   --------------------------------------------------------------------------
+   全部颜色走宿主主题变量并带兜底值，深浅色/主题色切换自动跟随。
+   注意：宿主把插件页包在 `.plugin-page-host`（h-full min-h-0 overflow-hidden），
+   它只裁剪不滚动 —— 所以页面根元素必须自己成为滚动容器，
+   而且不能用 flex-column（子项 flex-shrink:1 会把内容压扁，滚动条永远不出现）。
+   ========================================================================== */
+
+.kr-page {
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: block;
+  padding: 18px 22px 140px;
+  box-sizing: border-box;
+  color: var(--color-text-main, #1f2937);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--color-text-main, #888) 26%, transparent) transparent;
+  overscroll-behavior: contain;
+}
+
+.kr-page > * {
+  max-width: 1040px;
+  margin: 0 auto;
+}
+
+.kr-page > * + * {
+  margin-top: 18px;
+}
+
+.kr-page::-webkit-scrollbar {
+  width: 8px;
+}
+
+.kr-page::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--color-text-main, #888) 24%, transparent);
+  border-radius: 999px;
+}
+
+.kr-muted {
+  color: var(--color-text-secondary, #6b7280);
+  font-size: 12px;
+}
+
+/* ---------- 头部 ---------- */
+
+.kr-head {
+  display: block;
+}
+
+.kr-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.kr-title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+}
+
+.kr-subtitle {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--color-text-secondary, #6b7280);
+  max-width: 520px;
+  line-height: 1.5;
+}
+
+.kr-head-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+/* ---------- 按钮 ---------- */
+
+.kr-btn {
+  appearance: none;
+  border: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.1));
+  background: var(--control-bg, transparent);
+  color: var(--color-text-main, #1f2937);
+  font-size: 12px;
+  line-height: 1;
+  padding: 8px 12px;
+  border-radius: 9px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, opacity 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+
+.kr-btn:hover:not(:disabled) {
+  background: var(--control-hover-bg, color-mix(in srgb, var(--color-text-main, #000) 7%, transparent));
+}
+
+.kr-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.kr-btn[data-on='1'] {
+  border-color: var(--color-primary, #31cfa1);
+  color: var(--color-primary, #31cfa1);
+  background: color-mix(in srgb, var(--color-primary, #31cfa1) 12%, transparent);
+}
+
+.kr-btn-primary {
+  background: var(--color-primary, #31cfa1);
+  border-color: var(--color-primary, #31cfa1);
+  color: #fff;
+  font-weight: 600;
+}
+
+.kr-btn-primary:hover:not(:disabled) {
+  opacity: 0.9;
+  background: var(--color-primary, #31cfa1);
+}
+
+.kr-btn-danger {
+  border-color: var(--color-danger, #ef4444);
+  color: var(--color-danger, #ef4444);
+  background: color-mix(in srgb, var(--color-danger, #ef4444) 12%, transparent);
+}
+
+.kr-btn-ghost {
+  background: transparent;
+  color: var(--color-text-secondary, #6b7280);
+}
+
+/* ---------- 推荐源 chips ---------- */
+
+.kr-sources {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+
+.kr-chip {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.1));
+  background: var(--control-bg, transparent);
+  color: var(--color-text-secondary, #6b7280);
+  font-size: 12px;
+  padding: 7px 11px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.kr-chip:hover {
+  color: var(--color-text-main, #1f2937);
+  border-color: color-mix(in srgb, var(--color-text-main, #000) 22%, transparent);
+}
+
+.kr-chip[data-on='1'] {
+  border-color: var(--color-primary, #31cfa1);
+  color: var(--color-primary, #31cfa1);
+  background: color-mix(in srgb, var(--color-primary, #31cfa1) 12%, transparent);
+  font-weight: 600;
+}
+
+.kr-chip-lock,
+.kr-chip-inf {
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 5px;
+  background: color-mix(in srgb, currentColor 16%, transparent);
+  opacity: 0.85;
+}
+
+/* 该源已缓存的条数：切回去会恢复这份列表，不用重新请求 */
+.kr-chip-cache {
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 5px;
+  font-variant-numeric: tabular-nums;
+  background: color-mix(in srgb, currentColor 12%, transparent);
+  opacity: 0.75;
+}
+
+/* ---------- 工具条 ---------- */
+
+.kr-toolbar {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: 14px;
+}
+
+.kr-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.kr-field-label {
+  font-size: 12px;
+  color: var(--color-text-secondary, #6b7280);
+}
+
+.kr-input {
+  appearance: none;
+  border: 1px solid var(--control-border, var(--border-subtle, rgba(0, 0, 0, 0.12)));
+  background: var(--control-bg, transparent);
+  color: var(--color-text-main, #1f2937);
+  font-size: 12px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  min-width: 180px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.kr-input:focus {
+  border-color: var(--color-primary, #31cfa1);
+}
+
+.kr-input-sm {
+  min-width: 90px;
+}
+
+.kr-tag-presets {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.kr-tag {
+  appearance: none;
+  border: 1px dashed var(--border-subtle, rgba(0, 0, 0, 0.14));
+  background: transparent;
+  color: var(--color-text-secondary, #6b7280);
+  font-size: 11px;
+  padding: 5px 9px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.kr-tag:hover {
+  color: var(--color-primary, #31cfa1);
+  border-color: var(--color-primary, #31cfa1);
+}
+
+/* ---------- 提示条 ---------- */
+
+.kr-banner {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  border: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.1));
+  background: var(--color-bg-card, color-mix(in srgb, var(--color-text-main, #000) 4%, transparent));
+  color: var(--color-text-secondary, #6b7280);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.kr-banner-error {
+  border-color: color-mix(in srgb, var(--color-danger, #ef4444) 45%, transparent);
+  color: var(--color-danger, #ef4444);
+  background: color-mix(in srgb, var(--color-danger, #ef4444) 10%, transparent);
+}
+
+.kr-banner-live {
+  border-color: color-mix(in srgb, var(--color-primary, #31cfa1) 45%, transparent);
+  color: var(--color-primary, #31cfa1);
+  background: color-mix(in srgb, var(--color-primary, #31cfa1) 10%, transparent);
+}
+
+.kr-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: kr-pulse 1.4s ease-in-out infinite;
+  flex: none;
+}
+
+@keyframes kr-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+
+/* ---------- 歌曲列表 ---------- */
+
+.kr-list {
+  border: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.08));
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--color-bg-card, transparent);
+}
+
+.kr-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.06));
+  transition: background 0.12s;
+}
+
+.kr-row:last-child {
+  border-bottom: none;
+}
+
+.kr-row:hover {
+  background: var(--control-hover-bg, color-mix(in srgb, var(--color-text-main, #000) 5%, transparent));
+}
+
+.kr-row.is-current {
+  background: color-mix(in srgb, var(--color-primary, #31cfa1) 10%, transparent);
+}
+
+.kr-idx {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--color-text-secondary, #6b7280);
+  width: 26px;
+  height: 26px;
+  flex: none;
+  border-radius: 7px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  position: relative;
+}
+
+.kr-idx-num {
+  display: block;
+}
+
+.kr-idx-inner {
+  display: none;
+  align-items: center;
+  justify-content: center;
+}
+
+.kr-row:hover .kr-idx-num,
+.kr-row.is-current .kr-idx-num {
+  display: none;
+}
+
+.kr-row:hover .kr-idx-inner,
+.kr-row.is-current .kr-idx-inner {
+  display: flex;
+}
+
+.kr-row.is-current .kr-idx {
+  color: var(--color-primary, #31cfa1);
+}
+
+.kr-cover {
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  object-fit: cover;
+  flex: none;
+  background: var(--control-muted-bg, color-mix(in srgb, var(--color-text-main, #000) 8%, transparent));
+}
+
+.kr-meta {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.kr-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text-main, #1f2937);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kr-row.is-current .kr-name {
+  color: var(--color-primary, #31cfa1);
+}
+
+.kr-artist {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--color-text-secondary, #6b7280);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kr-album {
+  opacity: 0.75;
+}
+
+.kr-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.kr-q {
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 5px;
+  color: var(--color-primary, #31cfa1);
+  border: 1px solid color-mix(in srgb, var(--color-primary, #31cfa1) 45%, transparent);
+}
+
+.kr-src {
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 5px;
+  color: var(--color-text-secondary, #6b7280);
+  background: color-mix(in srgb, var(--color-text-main, #000) 8%, transparent);
+}
+
+.kr-time {
+  font-size: 12px;
+  color: var(--color-text-secondary, #6b7280);
+  font-variant-numeric: tabular-nums;
+  flex: none;
+  width: 42px;
+  text-align: right;
+}
+
+.kr-ops {
+  display: flex;
+  gap: 4px;
+  flex: none;
+}
+
+.kr-op {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--color-text-secondary, #6b7280);
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.7;
+  transition: all 0.15s;
+}
+
+.kr-op:hover {
+  opacity: 1;
+  background: color-mix(in srgb, var(--color-text-main, #000) 10%, transparent);
+}
+
+.kr-op.is-on {
+  color: var(--color-danger, #ef4444);
+  opacity: 1;
+}
+
+.kr-op-danger:hover {
+  color: var(--color-danger, #ef4444);
+}
+
+.kr-empty {
+  border: 1px dashed var(--border-subtle, rgba(0, 0, 0, 0.14));
+  border-radius: 14px;
+  padding: 36px 20px;
+  text-align: center;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--color-text-secondary, #6b7280);
+}
+
+/* ---------- 卡片 / 表格 / 统计 ---------- */
+
+.kr-card {
+  border: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.08));
+  border-radius: 14px;
+  padding: 14px 16px;
+  background: var(--color-bg-card, transparent);
+}
+
+.kr-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.kr-card-head h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.kr-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.kr-table th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--color-text-secondary, #6b7280);
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.1));
+  white-space: nowrap;
+}
+
+.kr-table td {
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.05));
+  color: var(--color-text-main, #1f2937);
+  vertical-align: top;
+}
+
+.kr-cell-clip {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-secondary, #6b7280);
+}
+
+.kr-ok {
+  color: var(--color-primary, #31cfa1);
+  font-weight: 600;
+}
+
+.kr-bad {
+  color: var(--color-danger, #ef4444);
+  font-weight: 600;
+}
+
+.kr-warn {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-warning, #f59e0b);
+  border: 1px solid color-mix(in srgb, var(--color-warning, #f59e0b) 45%, transparent);
+  border-radius: 5px;
+  padding: 1px 5px;
+  white-space: nowrap;
+}
+
+.kr-stats {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.kr-stat {
+  flex: 1 1 110px;
+  border: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.08));
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.kr-stat b {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--color-text-main, #1f2937);
+  font-variant-numeric: tabular-nums;
+}
+
+.kr-stat span {
+  font-size: 11px;
+  color: var(--color-text-secondary, #6b7280);
+}
+
+/* ---------- 设置面板 ---------- */
+
+.kr-settings {
+  display: block;
+}
+
+.kr-settings > * + * {
+  margin-top: 14px;
+}
+
+.kr-set-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.06));
+}
+
+.kr-set-row:last-child {
+  border-bottom: none;
+}
+
+.kr-set-text {
+  min-width: 0;
+}
+
+.kr-set-label {
+  font-size: 13px;
+  color: var(--color-text-main, #1f2937);
+}
+
+.kr-set-hint {
+  margin-top: 3px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--color-text-secondary, #6b7280);
+}
+
+.kr-set-control {
+  flex: none;
+}
+
+/* 自绘开关：原生 checkbox 的状态太不明显 */
+.kr-switch {
+  appearance: none;
+  border: none;
+  cursor: pointer;
+  width: 40px;
+  height: 22px;
+  border-radius: 999px;
+  padding: 2px;
+  background: color-mix(in srgb, var(--color-text-main, #000) 18%, transparent);
+  display: flex;
+  align-items: center;
+  transition: background 0.18s;
+}
+
+.kr-switch[data-on='1'] {
+  background: var(--color-primary, #31cfa1);
+  justify-content: flex-end;
+}
+
+.kr-switch-knob {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  display: block;
+}
+
+.kr-footnote {
+  margin: 14px 0 0;
+  line-height: 1.6;
+}
