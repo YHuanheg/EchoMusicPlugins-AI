@@ -43,7 +43,7 @@
 EchoMusic「插件管理 → 在线插件源」里添加：
 
 ```
-https://github.com/YHuanheg/EchoMusic-GhAccelerator
+https://github.com/YHuanheg/EchoMusicPlugins-AI
 ```
 
 宿主会自动读取仓库根目录的 `echo-plugins.json`。
