@@ -13,9 +13,12 @@
 │  └─ README.md
 ├─ kugou-daily-vip/                   # 插件：概念版每日领VIP
 ├─ kugou-recommend/                   # 插件：推荐电台（多源音乐推荐）
+├─ tag-filter/                        # 插件：插件标签筛选（给插件面板加标签筛选条）
 ├─ tests/                             # 无头集成测试 + 真实网络冒烟 + 变异测试
 │  ├─ kugou-recommend.smoke.mjs      # 真实 Vue 3 ESM + mock ctx，275 条断言
 │  ├─ kugou-recommend.live.mjs       # 打真实网关，验证上游形态确实能解析
+│  ├─ tag-filter.smoke.mjs           # 仿真宿主 DOM，203 条断言
+│  ├─ tag-filter.mutate.mjs          # 标签筛选的变异测试（16 个变异）
 │  └─ mutate-check.mjs               # 把关键行为改回 bug，确认测试真的会失败
 └─ docs/
    ├─ EchoMusic-插件系统与加速链路调研.md   # 调研 + 实测数据 + 设计决策
@@ -31,6 +34,7 @@
 | **GitHub 加速器** | `gh-accelerator` | 为宿主的更新检查与在线插件下载挑选最快线路，把Xget 接进来，并在在线插件页显示加速状态与刷新进度 | [README](gh-accelerator/README.md) |
 | **概念版每日领VIP** | `kugou-daily-vip` | 每天自动领取酷狗概念版畅听 VIP（听歌 + 广告 + 签到） | [README](kugou-daily-vip/README.md) |
 | **推荐电台** | `kugou-recommend` | 八源音乐推荐：频道漫游 / 每日推荐 / 猜你喜欢 / 曲风 / AI / 新歌 / 历史 / 排行 | [README](kugou-recommend/README.md) |
+| **插件标签筛选** | `tag-filter` | 给「设置 → 插件」面板加一条标签筛选条：自动聚合面板内所有插件的标签，多选实时过滤、清除筛选、空状态提示 | [README](tag-filter/README.md) |
 
 ## 安装
 
@@ -203,9 +207,42 @@ Xget 更快、支持 20+ 平台，但属于**路径重写**形态，直接填入
 
 ---
 
+# 插件标签筛选（`tag-filter`）
+
+> 当前版本 **1.0.0**
+
+给「设置 → 插件」面板加一条**标签筛选条**：把面板里所有插件的标签自动聚合出来，
+点一个或多个标签即实时过滤卡片列表，「清除筛选」回到完整列表，没有匹配时给出友好的空状态。
+
+```
+按标签筛选  ⬤kugou 2  ⬤lyrics 5  ⬤player 3  ⬤浮窗 4 …   [任一|全部]  [清除筛选]
+显示 5 / 22 · 已选 1 个标签 · 隐藏 17 个
+```
+
+- 标签**就是宿主自己渲染在卡片上的那排标签**，所以「已安装」与「在线插件」两个视图都能用，
+  与宿主自己的搜索框、来源筛选叠加生效；
+- 「任一 / 全部」切换匹配语义；chip 上的数字 = 当前视图里带该标签的插件数（不随选择跳动）；
+- 没有任何标签的插件归到「未标注」，不会永远筛不出来；加上去也匹配不到的标签会被划掉提示；
+- 附带一个「标签总览」页（侧边栏「插件 → 标签筛选」）：不与面板同屏时也能看全部标签并预选。
+
+三个值得记的工程点（详见 [`tag-filter/README.md`](tag-filter/README.md)）：
+
+| 决策 | 为什么 |
+| --- | --- |
+| 隐藏卡片用**行内 `style.display`**，不用 class | 宿主卡片的 class 是动态绑定，启用/停用插件时 Vue 会整串重写 `el.className`，加的 class 会被抹掉 |
+| 不用 `ctx.dom.observe`，自建 MutationObserver + 1s 兜底 | `dom.observe` 是「每个新元素只回调一次」，宿主原地重渲染时不再触发，做实时过滤会漏更新 |
+| 必须靠网格的 `aria-busy="true"` 跳过骨架屏 | 骨架卡片同样带 `.plugin-card` / `.marketplace-tags`，否则加载期间会把占位标签当成真标签 |
+
+```
+tests/tag-filter.smoke.mjs    无头集成测试（真实 Vue 3 ESM + 仿真宿主 DOM + mock ctx）203/203 通过
+tests/tag-filter.mutate.mjs   变异测试（把关键行为改回 bug，确认断言有效）            16/16 被抓到
+```
+
+---
+
 # 安全边界
 
-三个插件都遵守同一套边界：
+这些插件遵守同一套边界：
 
 - 只读写自己命名空间下的 `ctx.storage`（`plugin:<插件id>:<key>`）；
 - 不采集、不上传任何用户数据；

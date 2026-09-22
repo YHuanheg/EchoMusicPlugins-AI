@@ -1,0 +1,603 @@
+/* 插件标签筛选 —— 全部使用宿主主题变量，自动跟随深浅色与主题色
+ *
+ * 两套界面：
+ *   ① .etf-host / .etf-bar  注入到「设置 → 插件」面板里的筛选条（内联样式，随宿主排版）
+ *   ② .etf-page            插件自己的独立页面（标签总览）
+ *
+ * 注意：宿主把插件页包在 .plugin-page-host（h-full min-h-0 overflow-hidden）里，
+ * 它只裁剪、自身不滚动，所以 .etf-page 必须自己成为滚动容器，而且**不能用 flex 纵向布局**
+ * （子项 flex-shrink 默认为 1，内容超出会被压扁而不是溢出，既看不到滚动条内容也没了）。
+ */
+
+/* ====================================================================== *
+ * 一、注入到插件面板的筛选条
+ * ====================================================================== */
+
+/* 与宿主 .marketplace-toolbar 的 margin-bottom 对齐，紧贴卡片网格上方 */
+.etf-host {
+  margin-bottom: 0.875rem;
+}
+
+.etf-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  border-radius: 8px;
+  transition: box-shadow 0.2s ease;
+}
+
+/* 独立页面「定位筛选条」时的高亮提示 */
+.etf-bar.is-focused {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-primary, #0071e3) 45%, transparent);
+}
+
+.etf-bar-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.625rem;
+}
+
+.etf-bar-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  flex-shrink: 0;
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--color-text-secondary, #6b7280);
+}
+
+.etf-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.375rem;
+  min-width: 0;
+}
+
+.etf-bar-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-left: auto;
+}
+
+/* ---------- 标签 chip ---------- */
+
+.etf-chip,
+.etf-seg-btn,
+.etf-clear,
+.etf-btn,
+.etf-empty-btn {
+  font-family: inherit;
+  margin: 0;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.etf-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3125rem;
+  height: 1.5rem;
+  max-width: 13rem;
+  padding: 0 0.5rem;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: var(--control-muted-bg, rgba(127, 127, 127, 0.1));
+  color: var(--color-text-secondary, #6b7280);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.16s ease, color 0.16s ease, border-color 0.16s ease, transform 0.16s ease;
+}
+
+.etf-chip:hover {
+  background: var(--control-hover-bg, rgba(127, 127, 127, 0.18));
+  color: var(--color-text-main, #1f2937);
+}
+
+.etf-chip:active {
+  transform: translateY(1px);
+}
+
+.etf-chip.is-on {
+  background: color-mix(in srgb, var(--color-primary, #0071e3) 15%, transparent);
+  border-color: color-mix(in srgb, var(--color-primary, #0071e3) 42%, transparent);
+  color: var(--color-primary, #0071e3);
+}
+
+.etf-chip.is-on:hover {
+  background: color-mix(in srgb, var(--color-primary, #0071e3) 22%, transparent);
+  color: var(--color-primary, #0071e3);
+}
+
+/* 加入当前选择后一个都匹配不到：弱化但**不禁用**，用户仍可点它换一组条件 */
+.etf-chip.is-dead {
+  opacity: 0.45;
+}
+
+.etf-chip.is-dead .etf-chip-label {
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+
+/* 能力标签：虚线边框，与目录标签区分 */
+.etf-chip.is-cap {
+  border-style: dashed;
+  border-color: color-mix(in srgb, currentColor 40%, transparent);
+}
+
+.etf-chip.is-untagged {
+  font-style: italic;
+}
+
+.etf-chip-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.etf-chip-count {
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
+  opacity: 0.7;
+}
+
+.etf-chip-lg {
+  height: 1.75rem;
+  padding: 0 0.6875rem;
+  font-size: 0.75rem;
+}
+
+/* ---------- 匹配方式分段控件 ---------- */
+
+.etf-seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--control-muted-bg, rgba(127, 127, 127, 0.1));
+}
+
+.etf-seg-btn {
+  height: 1.375rem;
+  padding: 0 0.5rem;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-secondary, #6b7280);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.16s ease, color 0.16s ease;
+}
+
+.etf-seg-btn:hover {
+  color: var(--color-text-main, #1f2937);
+}
+
+.etf-seg-btn.is-on {
+  background: var(--control-active-bg, rgba(127, 127, 127, 0.22));
+  color: var(--color-text-main, #1f2937);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+.etf-seg-lg .etf-seg-btn {
+  height: 1.625rem;
+  padding: 0 0.75rem;
+  font-size: 0.75rem;
+}
+
+/* ---------- 清除筛选 ---------- */
+
+.etf-clear {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3125rem;
+  height: 1.75rem;
+  padding: 0 0.625rem;
+  border: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.22));
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-text-secondary, #6b7280);
+  font-size: 0.75rem;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.16s ease, color 0.16s ease, border-color 0.16s ease;
+}
+
+.etf-clear:hover:not(:disabled) {
+  background: var(--control-hover-bg, rgba(127, 127, 127, 0.1));
+  border-color: var(--control-border, rgba(127, 127, 127, 0.4));
+  color: var(--color-text-main, #1f2937);
+}
+
+.etf-clear:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.etf-clear-lg {
+  height: 1.875rem;
+  padding: 0 0.75rem;
+}
+
+/* ---------- 状态行 ---------- */
+
+.etf-status {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: var(--color-text-secondary, #6b7280);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 降级提示：宿主一个标签都没给出来时说清楚原因，避免用户以为插件坏了 */
+.etf-hint {
+  padding: 0.5rem 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--color-warning, #f59e0b) 32%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--color-warning, #f59e0b) 12%, transparent);
+  color: var(--color-text-secondary, #6b7280);
+  font-size: 0.6875rem;
+  line-height: 1.6;
+}
+
+/* ---------- 空状态 ---------- */
+
+.etf-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 2rem 1rem;
+  border: 1px dashed var(--border-subtle, rgba(127, 127, 127, 0.3));
+  border-radius: 10px;
+  background: var(--color-bg-elevated, rgba(127, 127, 127, 0.05));
+  text-align: center;
+}
+
+.etf-empty-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 999px;
+  background: var(--control-muted-bg, rgba(127, 127, 127, 0.12));
+  color: var(--color-text-secondary, #6b7280);
+  margin-bottom: 0.25rem;
+}
+
+.etf-empty-title {
+  margin: 0;
+  font-size: 0.875rem;
+  font-weight: 700;
+  color: var(--color-text-main, #1f2937);
+}
+
+.etf-empty-desc {
+  margin: 0;
+  max-width: 34rem;
+  font-size: 0.75rem;
+  line-height: 1.6;
+  color: var(--color-text-secondary, #6b7280);
+}
+
+.etf-empty-btn {
+  margin-top: 0.5rem;
+  height: 1.875rem;
+  padding: 0 0.875rem;
+  border: 1px solid color-mix(in srgb, var(--color-primary, #0071e3) 45%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--color-primary, #0071e3) 13%, transparent);
+  color: var(--color-primary, #0071e3);
+  font-size: 0.75rem;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.16s ease;
+}
+
+.etf-empty-btn:hover {
+  background: color-mix(in srgb, var(--color-primary, #0071e3) 20%, transparent);
+}
+
+/* ====================================================================== *
+ * 二、插件独立页面（标签总览）
+ * ====================================================================== */
+
+.etf-page {
+  --etf-radius: 14px;
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: block; /* 不要 flex column，否则内容会被压扁、看不到滚动条 */
+  padding: 18px 22px 140px;
+  box-sizing: border-box;
+  color: var(--color-text-main, #1f2937);
+  font-family: var(--font-sans, inherit);
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--color-text-main, #888) 26%, transparent) transparent;
+  overscroll-behavior: contain;
+}
+
+.etf-page > * {
+  max-width: 1040px;
+  margin: 0 auto;
+}
+
+.etf-page > * + * {
+  margin-top: 18px;
+}
+
+.etf-page *,
+.etf-page *::before,
+.etf-page *::after {
+  box-sizing: border-box;
+}
+
+.etf-hero {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px 20px;
+  border: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.08));
+  border-radius: var(--etf-radius);
+  background: var(--color-bg-elevated, rgba(127, 127, 127, 0.06));
+}
+
+.etf-hero-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  font-size: 20px;
+  font-weight: 650;
+  letter-spacing: -0.2px;
+}
+
+.etf-hero-desc {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--color-text-secondary, #6b7280);
+}
+
+.etf-hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.etf-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 14px;
+  border: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.24));
+  border-radius: 9px;
+  background: var(--color-bg-card, transparent);
+  color: var(--color-text-main, #1f2937);
+  font-size: 12.5px;
+  font-weight: 650;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.16s ease, border-color 0.16s ease, transform 0.16s ease;
+}
+
+.etf-btn:hover {
+  background: var(--control-hover-bg, rgba(127, 127, 127, 0.1));
+  border-color: var(--control-border, rgba(127, 127, 127, 0.4));
+}
+
+.etf-btn:active {
+  transform: translateY(1px);
+}
+
+.etf-card {
+  display: block;
+  padding: 16px 18px;
+  border: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.08));
+  border-radius: var(--etf-radius);
+  background: var(--color-bg-card, var(--color-bg-elevated, rgba(127, 127, 127, 0.04)));
+}
+
+.etf-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.etf-card-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.etf-card-meta {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--color-text-secondary, #6b7280);
+}
+
+.etf-page-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.etf-page-empty {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--color-text-secondary, #6b7280);
+}
+
+.etf-page-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.14));
+}
+
+.etf-kv {
+  display: flex;
+  flex-direction: column;
+}
+
+.etf-kv-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.1));
+  font-size: 12.5px;
+}
+
+.etf-kv-row:last-child {
+  border-bottom: 0;
+}
+
+.etf-kv-key {
+  flex-shrink: 0;
+  width: 6.5rem;
+  color: var(--color-text-secondary, #6b7280);
+  font-weight: 600;
+}
+
+.etf-kv-val {
+  min-width: 0;
+  word-break: break-word;
+}
+
+/* ====================================================================== *
+ * 三、设置面板
+ * ====================================================================== */
+
+.etf-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.etf-switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 11px 13px;
+  border: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.16));
+  border-radius: 11px;
+  background: var(--control-muted-bg, rgba(127, 127, 127, 0.05));
+  transition: background 0.18s ease, border-color 0.18s ease;
+}
+
+.etf-switch-row.is-on {
+  border-color: color-mix(in srgb, var(--color-primary, #0071e3) 32%, transparent);
+  background: color-mix(in srgb, var(--color-primary, #0071e3) 8%, transparent);
+}
+
+.etf-switch-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.etf-switch-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--color-text-main, #1f2937);
+}
+
+.etf-switch-desc {
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--color-text-secondary, #6b7280);
+}
+
+.etf-state-chip {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--control-muted-bg, rgba(127, 127, 127, 0.14));
+  color: var(--color-text-secondary, #6b7280);
+  font-size: 10.5px;
+  font-weight: 700;
+}
+
+.etf-state-chip.is-on {
+  background: color-mix(in srgb, var(--color-primary, #0071e3) 18%, transparent);
+  color: var(--color-primary, #0071e3);
+}
+
+/* 真实开关：轨道 + 滑块，状态一眼可辨（不要用原生 checkbox） */
+.etf-switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  width: 38px;
+  height: 22px;
+  padding: 2px;
+  border-radius: 999px;
+  background: var(--control-muted-bg, rgba(127, 127, 127, 0.28));
+  cursor: pointer;
+  transition: background 0.18s ease;
+}
+
+.etf-switch[data-on='true'] {
+  background: var(--color-primary, #0071e3);
+}
+
+.etf-switch-knob {
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  transition: transform 0.18s ease;
+}
+
+.etf-switch[data-on='true'] .etf-switch-knob {
+  transform: translateX(16px);
+}
+
+.etf-switch:focus-visible {
+  outline: 2px solid var(--color-primary, #0071e3);
+  outline-offset: 2px;
+}
+
+.etf-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 11px 13px;
+  border: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.16));
+  border-radius: 11px;
+  background: var(--control-muted-bg, rgba(127, 127, 127, 0.05));
+}
+
+.etf-field-label {
+  font-size: 13px;
+  font-weight: 650;
+}

@@ -1,0 +1,17 @@
+{
+  "id": "tag-filter",
+  "name": "插件标签筛选",
+  "version": "1.0.0",
+  "description": "在插件管理面板里按标签筛选插件：自动聚合面板中所有插件的标签供点选，支持多选实时过滤、任一/全部匹配、清除筛选与空状态提示，风格与宿主插件面板保持一致。",
+  "author": "YHuanheg",
+  "icon": "icon.svg",
+  "main": "index.js",
+  "style": "style.css",
+  "runtime": {
+    "miniPlayer": false,
+    "desktopLyric": false
+  },
+  "requires": {
+    "echoMusicVersion": ">=2.3.0"
+  }
+}

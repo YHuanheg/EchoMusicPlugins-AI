@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
+  stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+  <!-- 标签筛选：漏斗 + 标签 -->
+  <path d="M3 5h18l-6.6 7.6V19l-4.8 2v-8.4L3 5z" />
+  <path d="M15.5 3.6 17 2.1a1.2 1.2 0 0 1 1.7 0l2.2 2.2a1.2 1.2 0 0 1 0 1.7l-3.6 3.6" />
+  <circle cx="17.4" cy="4.6" r="0.7" fill="currentColor" stroke="none" />
+</svg>

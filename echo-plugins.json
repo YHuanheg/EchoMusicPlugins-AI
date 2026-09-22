@@ -44,6 +44,19 @@
         "fm",
         "playlist"
       ]
+    },
+    {
+      "id": "tag-filter",
+      "path": "tag-filter",
+      "repo": "https://github.com/YHuanheg/EchoMusicPlugins-AI",
+      "homepage": "https://github.com/YHuanheg/EchoMusicPlugins-AI/tree/main/tag-filter",
+      "tags": [
+        "plugin-management",
+        "filter",
+        "tags",
+        "ui",
+        "productivity"
+      ]
     }
   ]
 }
