@@ -65,14 +65,6 @@ const PRESET_PROXY = [
 /** Xget 形态：`{域名}/{平台前缀}{路径}`，全平台，但不兼容 EchoMusic 的加速地址格式 */
 const PRESET_XGET = [
   {
-    id: 'xget-self',
-    name: 'Xget（自建）',
-    domain: 'https://xget-ckf.pages.dev',
-    kind: 'xget',
-    prefix: 'gh',
-    note: '你的 Cloudflare Pages 实例'
-  },
-  {
     id: 'xget-official',
     name: 'Xget 官方实例',
     domain: 'https://xget.xi-xu.me',
@@ -1457,7 +1449,7 @@ export async function activate(ctx) {
               'p',
               { class: 'gha-hero-desc' },
               'EchoMusic 的「GitHub 加速地址」用于更新检查和在线插件市场下载。本插件通过真实下载实测比较各条线路，' +
-                '把最快的一条写进宿主设置；自建 Xget 可通过本地桥直接接管加速，另提供多平台链接转换。'
+                '把最快的一条写进宿主设置；Xget 可通过本地桥直接接管加速，另提供多平台链接转换。'
             ),
             h('div', { class: 'gha-hero-actions' }, [
               renderButton(state.testing ? '测速中…' : '一键测速', () => void runSpeedTest(), {
@@ -1514,7 +1506,7 @@ export async function activate(ctx) {
               { class: 'gha-card-hint' },
               '宿主只认 gh-proxy 形态（前缀 + 完整 URL），Xget 是路径重写形态，直接填会 404。' +
                 '本插件在 127.0.0.1 起一个只做 302 跳转的本地桥，把宿主的请求换算成 Xget 规范路径 —— ' +
-                '于是自建 Xget 也能直接为宿主加速，且不需要额外部署。'
+                '于是Xget 也能直接为宿主加速，且不需要额外部署。'
             ),
             h('div', { class: 'gha-inline' }, [
               h('span', { class: 'gha-label', style: 'flex:0 0 auto' }, '桥接线路'),

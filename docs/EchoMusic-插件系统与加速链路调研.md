@@ -1,7 +1,7 @@
 # EchoMusic 插件系统与 GitHub 加速链路调研
 
 > 结论先行：EchoMusic 的「GitHub 加速地址」只接受 **gh-proxy 形态**（`前缀 + / + 完整原始 URL`）。
-> 自建 Xget 更快、支持平台更多，但它是**路径重写**形态，直接填会 404。
+> Xget 更快、支持平台更多，但它是**路径重写**形态，直接填会 404。
 > 插件用两种方式打通：**内置本地桥**（`127.0.0.1` 上只做 302 跳转，零部署，已端到端实测）
 > 与**可选云端桥**（Pages Function，插件关掉也生效）。
 
@@ -240,15 +240,15 @@ const accelerate = (url, proxy) => {
 
 ### 3.3 实测：Xget 与宿主格式不兼容
 
-`xget-ckf.pages.dev` 是 Xget 在 Cloudflare Pages 上的部署。Xget 的 URL 规则是
+`<你的 Xget 域名>` 是 Xget 在 Cloudflare Pages 上的部署。Xget 的 URL 规则是
 `https://<host>/<平台前缀>/<平台内路径>`，与上面的拼接方式冲突。
 
 | 请求 | 状态 | 耗时 |
 | --- | --- | --- |
-| `https://xget-ckf.pages.dev/gh/hoowhoami/EchoMusic/raw/main/docs/plugin-system.md` | ✅ 200 | 576 ms |
-| `https://xget-ckf.pages.dev/https://raw.githubusercontent.com/hoowhoami/EchoMusic/main/docs/plugin-system.md` | ❌ 404 | — |
-| `https://xget-ckf.pages.dev/gh/https://raw.githubusercontent.com/hoowhoami/EchoMusic/…` | ❌ 404 | — |
-| `https://xget-ckf.pages.dev/gh/github.com/hoowhoami/EchoMusic/archive/refs/heads/main.zip` | ❌ 404 | — |
+| `https://<你的 Xget 域名>/gh/hoowhoami/EchoMusic/raw/main/docs/plugin-system.md` | ✅ 200 | 576 ms |
+| `https://<你的 Xget 域名>/https://raw.githubusercontent.com/hoowhoami/EchoMusic/main/docs/plugin-system.md` | ❌ 404 | — |
+| `https://<你的 Xget 域名>/gh/https://raw.githubusercontent.com/hoowhoami/EchoMusic/…` | ❌ 404 | — |
+| `https://<你的 Xget 域名>/gh/github.com/hoowhoami/EchoMusic/archive/refs/heads/main.zip` | ❌ 404 | — |
 
 （对照）gh-proxy 形态：
 
@@ -283,12 +283,12 @@ Xget 的 `gh` 前缀对应的是 **`github.com` 的网页路径结构**，直接
 
 | 线路 | 形态 | 传输量 | 耗时 | 吞吐 |
 | --- | --- | --- | --- | --- |
-| `xget-ckf.pages.dev`（自建 Xget） | Xget | 465 KB | 787 ms | **577 KB/s** |
-| `xget-ckf.pages.dev`（codeload 大包） | Xget | 23.9 MB | 4.64 s | **5.0 MB/s** |
+| Xget 实例 | Xget | 465 KB | 787 ms | **577 KB/s** |
+| Xget 实例（codeload 大包） | Xget | 23.9 MB | 4.64 s | **5.0 MB/s** |
 | `gh-proxy.com` | gh-proxy | 264 KB | 854 ms | 302 KB/s |
 | `ghproxy.net` | gh-proxy | 274 KB | 1196 ms | 224 KB/s |
 
-**自建 Xget 在吞吐上明显占优**，但受 3.3 的形态约束不能直填——这就是桥接函数存在的意义。
+**Xget 在吞吐上明显占优**，但受 3.3 的形态约束不能直填——这就是桥接函数存在的意义。
 
 ### 3.6 公益加速源普查（38 条候选 → 24 条可用）
 
@@ -325,7 +325,7 @@ Xget 的 `gh` 前缀对应的是 **`github.com` 的网页路径结构**，直接
 
 ---
 
-## 四、方案：让自建 Xget 也能当宿主加速地址
+## 四、方案：让Xget 也能当宿主加速地址
 
 ### 4.1 前提：宿主的下载器跟随重定向
 
@@ -344,7 +344,7 @@ $s = async (url, options) => (await getSession()).fetch(url instanceof URL ? url
 
 ```
 宿主  →  http://127.0.0.1:47823/https://github.com/o/r/archive/refs/heads/main.zip
-      ←  302  Location: https://xget-ckf.pages.dev/gh/o/r/archive/refs/heads/main.zip
+      ←  302  Location: https://<你的 Xget 域名>/gh/o/r/archive/refs/heads/main.zip
       →  Xget 200 + 文件内容
 ```
 
@@ -369,7 +369,7 @@ $s = async (url, options) => (await getSession()).fetch(url instanceof URL ? url
 | 含 query 的 URL | ✅ 200 | 16.8 KB | — |
 | 不支持的主机 | ✅ 502（按设计拒绝） | — | — |
 
-最终 URL 均落在 `https://xget-ckf.pages.dev/gh/...`。
+最终 URL 均落在 `https://<你的 Xget 域名>/gh/...`。
 
 ### 4.3 备选：云端桥（不改插件也生效）
 

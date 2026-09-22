@@ -19,7 +19,7 @@
 │  └─ mutate-check.mjs               # 把关键行为改回 bug，确认测试真的会失败
 └─ docs/
    ├─ EchoMusic-插件系统与加速链路调研.md   # 调研 + 实测数据 + 设计决策
-   └─ xget-bridge/                        # 可选：让自建 Xget 兼容宿主格式的 Pages Function
+   └─ xget-bridge/                        # 可选：让Xget 兼容宿主格式的 Pages Function
       ├─ functions/[[path]].js
       └─ README.md
 ```
@@ -28,7 +28,7 @@
 
 | 插件 | id | 一句话 | 文档 |
 |---|---|---|---|
-| **GitHub 加速器** | `gh-accelerator` | 为宿主的更新检查与在线插件下载挑选最快线路，把自建 Xget 接进来，并在在线插件页显示加速状态与刷新进度 | [README](gh-accelerator/README.md) |
+| **GitHub 加速器** | `gh-accelerator` | 为宿主的更新检查与在线插件下载挑选最快线路，把Xget 接进来，并在在线插件页显示加速状态与刷新进度 | [README](gh-accelerator/README.md) |
 | **概念版每日领VIP** | `kugou-daily-vip` | 每天自动领取酷狗概念版畅听 VIP（听歌 + 广告 + 签到） | [README](kugou-daily-vip/README.md) |
 | **推荐电台** | `kugou-recommend` | 八源音乐推荐：频道漫游 / 每日推荐 / 猜你喜欢 / 曲风 / AI / 新歌 / 历史 / 排行 | [README](kugou-recommend/README.md) |
 
@@ -121,7 +121,7 @@ node tests/mutate-check.mjs
 ## 一句话结论
 
 EchoMusic 的「GitHub 加速地址」只接受 **gh-proxy 形态**（`前缀 + / + 完整原始 URL`）；
-自建 Xget 更快、支持 20+ 平台，但属于**路径重写**形态，直接填入会 404（实测确认）。
+Xget 更快、支持 20+ 平台，但属于**路径重写**形态，直接填入会 404（实测确认）。
 
 插件用两条路把 Xget 接进来：
 
@@ -149,7 +149,7 @@ EchoMusic 的「GitHub 加速地址」只接受 **gh-proxy 形态**（`前缀 + 
 
 | 线路 | 形态 | 探测文件 | 插件 zip 吞吐 |
 | --- | --- | --- | --- |
-| `xget-ckf.pages.dev`（自建 Xget） | Xget | ✅ 200 / 1121 ms | **577 KB/s**（大包 5.0 MB/s） |
+| Xget 实例 | Xget | ✅ 200 / 1121 ms | **577 KB/s**（大包 5.0 MB/s） |
 | `gh-proxy.com` | gh-proxy | ✅ 200 / 766 ms | 302 KB/s |
 | `ghproxy.net` | gh-proxy | ✅ 200 / 862 ms | 224 KB/s |
 | `ghfast.top` | gh-proxy | ⏱ 超时 | — |
@@ -157,7 +157,7 @@ EchoMusic 的「GitHub 加速地址」只接受 **gh-proxy 形态**（`前缀 + 
 | `github.moeyy.xyz` | gh-proxy | ⏱ 超时 | — |
 | `github.akams.cn` | gh-proxy | 🔒 TLS 信任失败 | — |
 
-### 本地桥 + 自建 Xget 端到端实测
+### 本地桥 + Xget 端到端实测
 
 用真实 HTTP 客户端通过本地桥取真实 GitHub 文件（等价于宿主 `session.fetch()` 的行为）：
 
@@ -169,7 +169,7 @@ EchoMusic 的「GitHub 加速地址」只接受 **gh-proxy 形态**（`前缀 + 
 | 含 query 的 URL | ✅ 200 | 16.8 KB | — |
 | 不支持的主机 | ✅ 502（按设计拒绝） | — | — |
 
-最终响应 URL 均落在 `https://xget-ckf.pages.dev/gh/...`，证明 302 → Xget 的链路成立。
+最终响应 URL 均落在 `https://<你的 Xget 域名>/gh/...`，证明 302 → Xget 的链路成立。
 
 **公益加速源普查（2026-09-19）**：以 [XIU2/UserScript](https://github.com/XIU2/UserScript)
 「Github 增强 - 高速下载」维护的公益加速源清单为来源，逐条在本机实测 ——
@@ -182,16 +182,16 @@ EchoMusic 的「GitHub 加速地址」只接受 **gh-proxy 形态**（`前缀 + 
 
 | 请求 | 结果 |
 | --- | --- |
-| `xget-ckf.pages.dev/gh/owner/repo/raw/main/file.md` | ✅ 200 |
-| `xget-ckf.pages.dev/https://raw.githubusercontent.com/...` | ❌ 404 |
-| `xget-ckf.pages.dev/gh/https://raw.githubusercontent.com/...` | ❌ 404 |
+| `<你的 Xget 域名>/gh/owner/repo/raw/main/file.md` | ✅ 200 |
+| `<你的 Xget 域名>/https://raw.githubusercontent.com/...` | ❌ 404 |
+| `<你的 Xget 域名>/gh/https://raw.githubusercontent.com/...` | ❌ 404 |
 
 完整数据与推导过程见 [`docs/EchoMusic-插件系统与加速链路调研.md`](docs/EchoMusic-插件系统与加速链路调研.md)。
 
 ## 插件能力
 
 - 一键测速 + 按吞吐排序（真实下载 GitHub 文件，而不是 ping 站点根目录）
-- **Xget 本地桥加速**：一键让自建 Xget 接管宿主加速地址，含完整链路自检
+- **Xget 本地桥加速**：一键让Xget 接管宿主加速地址，含完整链路自检
 - **在线插件界面加速状态条**：在「插件管理 → 在线插件」直接显示当前线路、实时速度与快捷操作
 - 一键把最快线路写入宿主 `githubProxyUrl`，写入后回读校验
 - 单条线路吞吐测速，区分「能连通」与「真的快」

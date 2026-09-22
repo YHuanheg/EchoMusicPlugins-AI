@@ -34,8 +34,8 @@ EchoMusic 内部把该设置拼成：
 
 | 请求 | 结果 |
 | --- | --- |
-| `https://xget-ckf.pages.dev/gh/hoowhoami/EchoMusic/raw/main/docs/plugin-system.md` | ✅ 200 |
-| `https://xget-ckf.pages.dev/https://raw.githubusercontent.com/hoowhoami/EchoMusic/…` | ❌ 404 |
+| `https://<你的 Xget 域名>/gh/hoowhoami/EchoMusic/raw/main/docs/plugin-system.md` | ✅ 200 |
+| `https://<你的 Xget 域名>/https://raw.githubusercontent.com/hoowhoami/EchoMusic/…` | ❌ 404 |
 | `https://gh-proxy.com/https://raw.githubusercontent.com/hoowhoami/EchoMusic/…` | ✅ 200 |
 
 所以插件把线路分成两类：
@@ -51,18 +51,18 @@ EchoMusic 内部把该设置拼成：
 ```
 宿主请求  http://127.0.0.1:47823/https://github.com/o/r/archive/refs/heads/main.zip
    ↓ 本地桥 302（纯路径换算，不占带宽）
-Xget      https://xget-ckf.pages.dev/gh/o/r/archive/refs/heads/main.zip
+Xget      https://<你的 Xget 域名>/gh/o/r/archive/refs/heads/main.zip
    ↓ 200
          （真正的文件内容，由 Xget 的边缘网络提供）
 ```
 
-于是**自建 Xget 也能直接给宿主加速，不需要额外部署任何东西**。
+于是**Xget 也能直接给宿主加速，不需要额外部署任何东西**。
 
 为什么是重定向而不是反向代理：宿主给本地服务的单次响应体上限是 **8 MB**，而插件 zip 允许到 **80 MB**，
 代理必然失败；重定向还能保留 Xget 自己的 Range / 缓存 / 重试语义，且不占用本地带宽。
 宿主下载走 `session.fetch()`，默认跟随 3xx，所以 302 会被正常解析。
 
-### 端到端实测（本地桥 + 自建 Xget）
+### 端到端实测（本地桥 + Xget）
 
 | 通过桥请求 | 结果 | 传输量 | 吞吐 |
 | --- | --- | --- | --- |
@@ -93,7 +93,7 @@ Xget      https://xget-ckf.pages.dev/gh/o/r/archive/refs/heads/main.zip
 - **一键测速**：并发实测全部内置 + 自定义线路，按吞吐排序，绿色可用 / 红色失败；
 - **在线插件界面状态条**：在「插件管理 → 在线插件」的工具条下方直接显示加速情况（见下节）；
 - **刷新拉取进度**：刷新在线插件时显示阶段、百分比、已拉取数量、速率与预计剩余；可选用「接管刷新按钮」拿到精确进度（见下节）；
-- **Xget 加速（本地桥）**：一键把自建 Xget 接入宿主加速地址，含完整链路自检；
+- **Xget 加速（本地桥）**：一键把Xget 接入宿主加速地址，含完整链路自检；
 - **「进入本页自动测速」开关**：真实开关控件 + 「已开启 / 已关闭」状态标签，与设置面板里的同一项联动（5 分钟内已测过则跳过）；
 - **侧边栏入口自检**：检测「插件」分组是否被折叠（折叠会让入口整组消失）并一键展开；入口开关即时生效；
 - **应用最快线路**：写入宿主 `githubProxyUrl`，回读校验，失败时给出可复制的手动值；
@@ -151,7 +151,7 @@ XIU2 的清单里还推荐了 `jsdelivr`（`/gh/user/repo@branch/file`）。本�
 | 状态 | 表现 |
 | --- | --- |
 | 未启用 | 灰色 ·「未启用加速 · 直连 GitHub」+ 提示实际影响 |
-| 已启用 | 主题色描边 ·「加速已启用」+ 当前线路名与地址（走本地桥时会写明 `本地桥 http://127.0.0.1:47823 → https://xget-ckf.pages.dev`）+ 已测得的吞吐 |
+| 已启用 | 主题色描边 ·「加速已启用」+ 当前线路名与地址（走本地桥时会写明 `本地桥 http://127.0.0.1:47823 → https://<你的 Xget 域名>`）+ 已测得的吞吐 |
 | 异常 | 橙色警告 ·「加速地址指向本地桥，但本地桥未运行」+ 处理建议 |
 
 状态条右侧带三个快捷操作：**测速**、**启用 Xget 加速**（已启用时自动隐藏）、**打开加速器**。
@@ -267,7 +267,7 @@ XIU2 的清单里还推荐了 `jsdelivr`（`/gh/user/repo@branch/file`）。本�
 
 ## 使用建议
 
-**想用自建 Xget（推荐，实测最快）**：
+**想用Xget（推荐，实测最快）**：
 
 1. 打开「加速器」页面 →「Xget 本地加速」卡片 → 点「启用 Xget 加速」；
 2. 点「自检」确认链路通（会显示 HTTP 状态、取到的字节数与速度）；

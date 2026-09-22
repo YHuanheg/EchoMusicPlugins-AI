@@ -439,7 +439,7 @@ ud = (e, t) => {
 > 实测该形态（经加速前缀）返回的是 **HTML**（484 KB），不是 JSON。
 > 真正取数用的是 `F_` 的 **raw** 形态 —— 照 `indexUrl` 去构造探针地址会拿到 HTML，从而误判成"镜像坏了"。
 
-**实测数据**（本机，2026-09-22，经自建 Xget）：
+**实测数据**（本机，2026-09-22，经Xget）：
 
 ```
 /gh/hoowhoami/EchoMusicPlugins/raw/HEAD/echo-plugins.json  → 200 ·  13979 B ·  290 ms · plugins=39
