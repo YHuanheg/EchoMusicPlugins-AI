@@ -7,20 +7,38 @@
    而且**不能用 flex-column**（子项 flex-shrink:1 会把内容压扁，滚动条永远不出现）。
    ========================================================================== */
 
+/* ---------- 两个根容器的**区别**（真踩过的坑，别随手合并这两条规则）----------
+   插件页  .sd-page     ：宿主把它包在 `.plugin-page-host`（h-full min-h-0 overflow-hidden），
+                         父容器有**确定高度** → 页面必须自己当滚动容器才滚得动。
+   插件设置 .sd-settings：宿主把设置渲染进弹窗（.plugin-settings-dialog → .dialog-scroll-area），
+                         **滚动由宿主提供**。这时若再写 height:100% + overflow-y:auto，
+                         本元素高度就会等于自身内容高度 → 自己滚不动；
+                         而宿主的滚动容器量到「没有溢出」→ 结果是**整页完全不滚**。
+                         所以设置根节点绝不能自带滚动，只做普通流式布局。
+   -------------------------------------------------------------------------- */
+
 .sd-page,
 .sd-settings {
+  box-sizing: border-box;
+  color: var(--color-text-main, #1f2937);
+  font-family: var(--font-sans, system-ui, sans-serif);
+}
+
+.sd-page {
   height: 100%;
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
   display: block;
   padding: 18px 22px 140px;
-  box-sizing: border-box;
-  color: var(--color-text-main, #1f2937);
-  font-family: var(--font-sans, system-ui, sans-serif);
   scrollbar-width: thin;
   scrollbar-color: color-mix(in srgb, var(--color-text-main, #888) 26%, transparent) transparent;
   overscroll-behavior: contain;
+}
+
+.sd-settings {
+  display: block;
+  padding: 2px 0 10px;
 }
 
 .sd-page > *,
@@ -34,13 +52,11 @@
   margin-top: 16px;
 }
 
-.sd-page::-webkit-scrollbar,
-.sd-settings::-webkit-scrollbar {
+.sd-page::-webkit-scrollbar {
   width: 8px;
 }
 
-.sd-page::-webkit-scrollbar-thumb,
-.sd-settings::-webkit-scrollbar-thumb {
+.sd-page::-webkit-scrollbar-thumb {
   background: color-mix(in srgb, var(--color-text-main, #888) 24%, transparent);
   border-radius: 999px;
 }
@@ -494,9 +510,7 @@
 
 /* ---------- 设置面板 ---------- */
 
-.sd-settings {
-  padding: 16px 20px 140px;
-}
+/* 设置面板的间距全交给上面的 .sd-settings（宿主弹窗自带内边距，这里不能再加，也不要自带滚动） */
 
 .sd-set-row {
   display: flex;
@@ -543,4 +557,292 @@
   border-color: color-mix(in srgb, var(--color-primary, #4f7cff) 45%, transparent);
   color: var(--color-primary, #3b5bdb);
   font-weight: 600;
+}
+
+/* ==========================================================================
+   下载确认框
+   --------------------------------------------------------------------------
+   通过 ctx.ui.teleport 挂到 <body>（宿主会包一层 .echo-plugin-teleport），
+   所以这里的 z-index 要压过播放栏（宿主播放栏容器是 z-1000），
+   并且不能依赖任何插件页内部的布局。
+   ========================================================================== */
+
+.sd-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 3400;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.42);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  animation: sd-mask-in 0.14s ease-out;
+}
+
+@keyframes sd-mask-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.sd-dialog {
+  box-sizing: border-box;
+  position: relative;
+  width: min(560px, 94vw);
+  max-height: min(720px, 100vh - 120px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 18px 20px 16px;
+  border-radius: 16px;
+  border: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.12));
+  background: var(--surface-dialog-base, var(--color-bg-elevated, #fff));
+  color: var(--color-text-main, #1f2937);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
+  animation: sd-dialog-in 0.16s ease-out;
+  scrollbar-width: thin;
+}
+
+@keyframes sd-dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.sd-dialog-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding-right: 30px;
+  margin-bottom: 14px;
+}
+
+.sd-dialog-head h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.sd-dialog-head p {
+  margin: 4px 0 0;
+}
+
+.sd-dialog-close {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
+  color: var(--color-text-secondary, #6b7280);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.16s ease, color 0.16s ease;
+}
+
+.sd-dialog-close:hover {
+  background: var(--control-hover-bg, rgba(0, 0, 0, 0.08));
+  color: var(--color-text-main, #1f2937);
+}
+
+.sd-dialog-body {
+  display: block;
+}
+
+.sd-dialog-body > * + * {
+  margin-top: 14px;
+}
+
+.sd-dialog-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.08));
+}
+
+.sd-dialog-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sd-dlg-current {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.sd-dlg-songs {
+  border: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.08));
+  border-radius: 11px;
+  background: var(--control-muted-bg, rgba(0, 0, 0, 0.03));
+  padding: 8px 11px;
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+.sd-dlg-song {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 3px 0;
+  font-size: 12px;
+}
+
+.sd-dlg-song-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 550;
+}
+
+.sd-dlg-block {
+  display: block;
+}
+
+.sd-dlg-block > * + * {
+  margin-top: 7px;
+}
+
+.sd-dlg-label {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--color-text-main, #1f2937);
+}
+
+.sd-dlg-input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.sd-dlg-extra {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ---------- 选项 chip / 小开关 ---------- */
+
+.sd-opt-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.sd-opt {
+  appearance: none;
+  border: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.14));
+  background: var(--control-muted-bg, rgba(0, 0, 0, 0.04));
+  color: var(--color-text-main, #1f2937);
+  border-radius: 999px;
+  padding: 6px 13px;
+  font-size: 12px;
+  font-family: inherit;
+  line-height: 1.25;
+  cursor: pointer;
+  transition: background 0.16s ease, border-color 0.16s ease, color 0.16s ease;
+}
+
+.sd-opt:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--color-primary, #4f7cff) 45%, transparent);
+}
+
+.sd-opt.is-on {
+  background: color-mix(in srgb, var(--color-primary, #4f7cff) 16%, transparent);
+  border-color: color-mix(in srgb, var(--color-primary, #4f7cff) 55%, transparent);
+  color: var(--color-primary, #3b5bdb);
+  font-weight: 650;
+}
+
+.sd-opt:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.sd-chip-toggle {
+  appearance: none;
+  border: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.14));
+  background: var(--control-muted-bg, rgba(0, 0, 0, 0.04));
+  color: var(--color-text-secondary, #6b7280);
+  border-radius: 999px;
+  padding: 5px 11px;
+  font-size: 11.5px;
+  font-family: inherit;
+  line-height: 1.3;
+  cursor: pointer;
+  transition: background 0.16s ease, border-color 0.16s ease, color 0.16s ease;
+}
+
+.sd-chip-toggle.is-on {
+  background: color-mix(in srgb, var(--color-primary, #4f7cff) 14%, transparent);
+  border-color: color-mix(in srgb, var(--color-primary, #4f7cff) 45%, transparent);
+  color: var(--color-primary, #3b5bdb);
+  font-weight: 600;
+}
+
+/* ==========================================================================
+   播放栏按钮（ctx.ui.mount 挂进 .player-actions）
+   --------------------------------------------------------------------------
+   宿主那一排按钮是「图标 + hover 放大 + 主题色高亮」，这里照抄同一套语言；
+   尺寸取 28px，尽量不吃宽度（player-actions 有 max-w-[320px]）。
+   ========================================================================== */
+
+.sd-bar-btn {
+  appearance: none;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin: 0 1px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: color-mix(in srgb, var(--color-text-main, #1f2937) 48%, transparent);
+  cursor: pointer;
+  transition: color 0.2s ease, background 0.2s ease, transform 0.2s ease;
+}
+
+.sd-bar-btn:hover:not(:disabled) {
+  color: var(--color-primary-text, #0b6fd5);
+  background: color-mix(in srgb, var(--color-primary, #4f7cff) 12%, transparent);
+  transform: scale(1.1);
+}
+
+.sd-bar-btn:active:not(:disabled) {
+  transform: scale(0.9);
+}
+
+.sd-bar-btn:disabled {
+  opacity: 0.32;
+  cursor: default;
+}
+
+.sd-bar-icon {
+  display: block;
+  pointer-events: none;
 }

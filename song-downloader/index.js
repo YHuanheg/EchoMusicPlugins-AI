@@ -98,6 +98,7 @@ const MAX_FILE_BYTES = 1024 * 1024 * 1024 // 单文件上限 1 GiB，防止误�
 const DEFAULT_SETTINGS = {
   quality: 'auto', // auto | 128 | 320 | flac | high | viper_tape
   saveMode: 'direct', // direct（系统下载目录）| ask（单曲弹另存为对话框）
+  confirmBeforeDownload: true, // 下载前弹确认框（可改音质/保存位置/文件名）
   fileNameTemplate: '{artist} - {name}',
   chunked: true, // Range 分片下载（能显示真实进度与速度）
   chunkSizeMb: 1,
@@ -106,6 +107,7 @@ const DEFAULT_SETTINGS = {
   toastOnDone: true,
   sidebarEntry: true,
   toolbarEntry: false,
+  playerBarButton: true, // 播放栏右侧的下载按钮
   debug: false
 }
 
@@ -878,9 +880,11 @@ export async function activate(ctx) {
     out.maxRetries = clamp(out.maxRetries, 0, 3)
     out.concurrency = clamp(out.concurrency, 1, 2)
     out.chunked = !!out.chunked
+    out.confirmBeforeDownload = !!out.confirmBeforeDownload
     out.toastOnDone = !!out.toastOnDone
     out.sidebarEntry = !!out.sidebarEntry
     out.toolbarEntry = !!out.toolbarEntry
+    out.playerBarButton = !!out.playerBarButton
     out.debug = !!out.debug
     return out
   }
@@ -897,6 +901,27 @@ export async function activate(ctx) {
     resolved: null // { trackId, quality, count, url, at }
   })
 
+  /**
+   * 下载确认框的状态。
+   * 注意：`handle`（FileSystemFileHandle）**不能**放进 reactive —— 它会被代理包装，
+   * 之后 handle.createWritable() 的 this 变成 Proxy，内部槽校验直接抛 Illegal invocation。
+   * 所以句柄单独持有在普通变量 saveHandleRef 里，reactive 里只放"有没有选过位置"。
+   */
+  const dlg = reactive({
+    open: false,
+    tracks: [],
+    quality: 'auto',
+    destination: 'downloads', // downloads | picker
+    pickedName: '',
+    template: '',
+    chunked: true,
+    toastOnDone: true,
+    remember: true,
+    error: '',
+    ready: false // 是否已经选好保存位置（picker 模式）
+  })
+  let saveHandleRef = null
+
   /** 取消标志与另存为句柄都放在容器外：句柄是宿主对象，放进 reactive 会被代理包装，
    *  之后 handle.createWritable() 的 this 就变成 Proxy，内部槽校验会抛 "Illegal invocation"。 */
   const controllers = new Map() // taskId → { canceled }
@@ -911,6 +936,7 @@ export async function activate(ctx) {
     state.settings[key] = value
     if (key === 'sidebarEntry') applySidebarEntry(!!value)
     if (key === 'toolbarEntry') applyToolbarEntry(!!value)
+    if (key === 'playerBarButton') applyPlayerBarButton(!!value)
     void writeStorage(KEY_SETTINGS, { ...state.settings })
   }
 
@@ -1280,11 +1306,14 @@ export async function activate(ctx) {
   }
 
   async function downloadCurrent() {
-    if (!currentTrack()) {
+    const cur = currentTrack()
+    if (!cur) {
       notice('当前没有正在播放的歌曲')
       return null
     }
-    // 「弹窗询问」只在单曲场景可用：批量下载弹 N 次对话框反而是骚扰
+    // 确认框（默认开）：音质 / 保存位置 / 文件名都在里面改
+    if (state.settings.confirmBeforeDownload) return openDownloadDialog([cur])
+    // 关掉确认框后，「保存方式 = 弹窗询问」这条快捷路径依然有效
     if (state.settings.saveMode === 'ask' && canUseSavePicker()) return downloadCurrentAs()
     return enqueueCurrent()
   }
@@ -1538,7 +1567,7 @@ export async function activate(ctx) {
             'data-key': key,
             disabled: !!t.unsupported,
             onClick: () => {
-              startDownloads([x.raw], state.settings.quality)
+              openDownloadDialog([x.raw])
             }
           },
           '下载'
@@ -1570,7 +1599,7 @@ export async function activate(ctx) {
               disabled: !selectedIds.length,
               onClick: () => {
                 const picked = usable.filter((x) => state.selected[trackKey(x.track)]).map((x) => x.raw)
-                startDownloads(picked, state.settings.quality)
+                openDownloadDialog(picked)
                 state.selected = {}
               }
             },
@@ -1838,6 +1867,7 @@ export async function activate(ctx) {
         h('div', { class: 'sd-settings' }, [
           h('section', { class: 'sd-card' }, [
             h('div', { class: 'sd-card-head' }, h('h3', null, '下载')),
+            toggle('confirmBeforeDownload', '下载前弹确认框', '每次下载前弹窗确认音质 / 保存位置 / 文件名；关掉则直接用下面的默认设置开始下载'),
             select('quality', '默认音质', '「自动」= 该歌可用的最高音质；不可用时自动逐级降级', [
               ['auto', '自动（最优可用）'],
               ['flac', 'FLAC'],
@@ -1873,6 +1903,7 @@ export async function activate(ctx) {
             h('div', { class: 'sd-card-head' }, h('h3', null, '界面与通知')),
             toggle('sidebarEntry', '侧边栏显示入口', '关闭后可从插件管理页重新启用；立即生效'),
             toggle('toolbarEntry', '顶部工具栏显示入口', '在标题栏放一个「下载当前歌曲」按钮；立即生效'),
+            toggle('playerBarButton', '播放栏显示下载按钮', '在播放栏右侧（收藏 / 播放队列那排）插一个下载按钮；立即生效，不需要重启'),
             toggle('toastOnDone', '完成时弹提示', '关闭后只在任务列表里显示结果'),
             toggle('debug', '调试日志', '在控制台输出解析与下载细节，便于排障')
           ]),
@@ -1885,11 +1916,538 @@ export async function activate(ctx) {
     }
   })
 
+  /* ---------------- 下载确认框 ---------------- */
+
+  const QUALITY_OPTIONS = [
+    ['auto', '自动（最优可用）'],
+    ['flac', 'FLAC'],
+    ['320', '320K'],
+    ['128', '128K'],
+    ['high', 'Hi-Res'],
+    ['viper_tape', '母带']
+  ]
+
+  function isAbortError(e) {
+    const msg = (e && e.message) || String(e === undefined || e === null ? '' : e)
+    return !!(e && (e.name === 'AbortError' || /cancel|已取消|用户取消/i.test(msg)))
+  }
+
+  /** 弹窗里「实际会用的音质」：auto = 该歌可用的最高音质 */
+  function dlgEffectiveQuality() {
+    if (dlg.quality !== 'auto') return dlg.quality
+    const first = dlg.tracks[0]
+    if (!first) return '128'
+    return availableQualities(first.track.relateGoods).slice(-1)[0] || '128'
+  }
+
+  function dlgPreviewName() {
+    const first = dlg.tracks[0]
+    if (!first) return ''
+    if (dlg.destination === 'picker' && dlg.pickedName) return dlg.pickedName
+    const q = dlgEffectiveQuality()
+    const ext = guessExtByQuality(q)
+    return buildFileName(first.track, q, ext, dlg.template || state.settings.fileNameTemplate)
+  }
+
+  /**
+   * 所有「下载」入口都先走这里：
+   * - 关掉 confirmBeforeDownload → 直接入队（老行为）
+   * - 开着 → 弹确认框，让用户改音质 / 选保存位置 / 改文件名模板
+   */
+  function openDownloadDialog(rawTracks) {
+    const list = []
+    for (const raw of rawTracks) {
+      const track = toNormalized(raw)
+      if (!track) continue
+      if (track.unsupported) {
+        notice(track.unsupported)
+        continue
+      }
+      list.push({ raw, track })
+    }
+    if (!list.length) return null
+    if (!state.settings.confirmBeforeDownload) {
+      startDownloads(
+        list.map((x) => x.raw),
+        state.settings.quality
+      )
+      return null
+    }
+    dlg.tracks = list
+    dlg.quality = state.settings.quality
+    dlg.destination = 'downloads'
+    dlg.pickedName = ''
+    dlg.template = state.settings.fileNameTemplate
+    dlg.chunked = !!state.settings.chunked
+    dlg.toastOnDone = !!state.settings.toastOnDone
+    dlg.remember = true
+    dlg.error = ''
+    dlg.ready = false
+    saveHandleRef = null
+    dlg.open = true
+    return dlg
+  }
+
+  function closeDownloadDialog() {
+    dlg.open = false
+    dlg.tracks = []
+    dlg.error = ''
+    dlg.ready = false
+    dlg.pickedName = ''
+    saveHandleRef = null
+  }
+
+  /** 「选择位置…」：必须在点击手势里调 picker，所以是「先选位置，再点开始下载」 */
+  async function chooseSaveTarget() {
+    const first = dlg.tracks[0]
+    if (!first) return
+    if (dlg.tracks.length > 1) {
+      dlg.error = '批量下载只能存到系统下载目录（避免逐首弹窗）'
+      return
+    }
+    if (!canUseSavePicker()) {
+      dlg.error = '当前内核不支持「选择位置」；可改用系统下载目录，或用「复制直链」交给下载工具'
+      return
+    }
+    const q = dlgEffectiveQuality()
+    const ext = guessExtByQuality(q)
+    const name = buildFileName(first.track, q, ext, dlg.template || state.settings.fileNameTemplate)
+    try {
+      const handle = await pickSaveHandle(name, ext)
+      saveHandleRef = handle
+      dlg.pickedName = (handle && handle.name) || name
+      dlg.destination = 'picker'
+      dlg.ready = true
+      dlg.error = ''
+    } catch (e) {
+      if (isAbortError(e)) {
+        dlg.error = '已取消选择位置'
+        return
+      }
+      log('另存为对话框失败', e)
+      dlg.error = '无法打开系统保存对话框：' + ((e && e.message) || String(e))
+    }
+  }
+
+  function confirmDownloadDialog() {
+    if (!dlg.open) return
+    const list = dlg.tracks.slice()
+    if (!list.length) {
+      closeDownloadDialog()
+      return
+    }
+    const quality = dlg.quality
+    const useHandle = dlg.destination === 'picker' ? saveHandleRef : null
+    if (dlg.destination === 'picker' && !useHandle) {
+      dlg.error = '还没有选择保存位置'
+      return
+    }
+    if (dlg.remember) {
+      setSetting('quality', quality)
+      setSetting('fileNameTemplate', dlg.template || DEFAULT_SETTINGS.fileNameTemplate)
+      setSetting('chunked', !!dlg.chunked)
+      setSetting('toastOnDone', !!dlg.toastOnDone)
+    }
+    const raws = list.map((x) => x.raw)
+    const opts = useHandle && list.length === 1 ? { saveHandle: useHandle } : undefined
+    closeDownloadDialog()
+    startDownloads(raws, quality, opts)
+  }
+
+  function onOptionClick(group, value) {
+    if (group === 'quality') {
+      dlg.quality = value
+      return
+    }
+    if (group === 'dest') {
+      if (value === 'downloads') {
+        dlg.destination = 'downloads'
+        dlg.ready = true
+        dlg.pickedName = ''
+        saveHandleRef = null
+        dlg.error = ''
+        return
+      }
+      void chooseSaveTarget()
+    }
+  }
+
+  function optionChip(group, value, label, active, disabled, extra) {
+    return h(
+      'button',
+      {
+        type: 'button',
+        class: 'sd-opt' + (active ? ' is-on' : ''),
+        role: 'radio',
+        'aria-checked': active ? 'true' : 'false',
+        'data-group': group,
+        'data-value': value,
+        disabled: !!disabled,
+        title: (extra && extra.title) || undefined,
+        onClick: () => onOptionClick(group, value)
+      },
+      label
+    )
+  }
+
+  function renderDialogBody() {
+    const first = dlg.tracks[0]
+    const multi = dlg.tracks.length > 1
+    const curQuality = dlgEffectiveQuality()
+
+    const songsBlock = multi
+      ? h('div', { class: 'sd-dlg-songs', 'data-role': 'dlg-songs' }, [
+          ...dlg.tracks.slice(0, 6).map((x, i) =>
+            h('div', { class: 'sd-dlg-song', key: 's-' + i }, [
+              h('span', { class: 'sd-dlg-song-name', title: x.track.name }, x.track.name),
+              h('span', { class: 'sd-muted' }, x.track.artist)
+            ])
+          ),
+          dlg.tracks.length > 6 ? h('div', { class: 'sd-muted' }, '…还有 ' + (dlg.tracks.length - 6) + ' 首') : null
+        ])
+      : h('div', { class: 'sd-dlg-current' }, [
+          first.track.coverUrl
+            ? h('img', { class: 'sd-cover', src: first.track.coverUrl, alt: '' })
+            : h('div', { class: 'sd-cover sd-cover-empty' }, '♪'),
+          h('div', { class: 'sd-meta' }, [
+            h('div', { class: 'sd-name', title: first.track.name }, first.track.name),
+            h('div', { class: 'sd-artist' }, first.track.artist + (first.track.album ? ' · ' + first.track.album : '')),
+            h('div', { class: 'sd-chips' }, [h('span', { class: 'sd-muted' }, '可用音质：'), ...qualityChips(first.track)])
+          ])
+        ])
+
+    const qualityBlock = h('div', { class: 'sd-dlg-block' }, [
+      h('div', { class: 'sd-dlg-label' }, '音质'),
+      h(
+        'div',
+        { class: 'sd-opt-group', 'data-role': 'dlg-quality-group' },
+        QUALITY_OPTIONS.map(([value, label]) =>
+          optionChip('quality', value, label, dlg.quality === value, false, {
+            title: value === 'auto' ? '每首歌各自取可用的最高音质' : label
+          })
+        )
+      ),
+      h('div', { class: 'sd-muted' }, multi ? '批量下载时每首歌各自按这个音质取，取不到会自动降级' : '实际会使用：' + (QUALITY_LABEL[curQuality] || curQuality))
+    ])
+
+    const destBlock = h('div', { class: 'sd-dlg-block' }, [
+      h('div', { class: 'sd-dlg-label' }, '保存位置'),
+      h('div', { class: 'sd-opt-group', 'data-role': 'dlg-dest-group' }, [
+        optionChip('dest', 'downloads', '系统下载目录', dlg.destination === 'downloads', false, {
+          title: 'Windows 通常是 %USERPROFILE%\\Downloads'
+        }),
+        optionChip('dest', 'picker', canUseSavePicker() ? '选择位置…' : '选择位置（不支持）', dlg.destination === 'picker', multi || !canUseSavePicker(), {
+          title: multi ? '批量下载只能存到系统下载目录' : '打开系统保存对话框，自己选目录与文件名'
+        })
+      ]),
+      h(
+        'div',
+        { class: 'sd-muted' },
+        dlg.destination === 'picker' && dlg.pickedName
+          ? '将保存到：' + dlg.pickedName
+          : multi
+            ? '批量下载逐首落到系统下载目录（Windows 通常是 %USERPROFILE%\\Downloads）'
+            : '落到系统下载目录（Windows 通常是 %USERPROFILE%\\Downloads）；想指定位置点「选择位置…」'
+      )
+    ])
+
+    const nameBlock = h('div', { class: 'sd-dlg-block' }, [
+      h('div', { class: 'sd-dlg-label' }, '文件名'),
+      h('input', {
+        class: 'sd-input sd-dlg-input',
+        type: 'text',
+        value: dlg.template,
+        'data-action': 'dlg-template',
+        placeholder: '{artist} - {name}',
+        onChange: (e) => {
+          dlg.template = e.target.value
+        }
+      }),
+      h('div', { class: 'sd-muted sd-mono', 'data-role': 'dlg-preview' }, '将保存为：' + (dlgPreviewName() || '-')),
+      h('div', { class: 'sd-muted' }, '可用占位符：{artist} {name} {album} {quality} {ext} {time}')
+    ])
+
+    const extraBlock = h('div', { class: 'sd-dlg-block sd-dlg-extra' }, [
+      h(
+        'button',
+        {
+          type: 'button',
+          class: 'sd-chip-toggle' + (dlg.chunked ? ' is-on' : ''),
+          role: 'switch',
+          'aria-checked': dlg.chunked ? 'true' : 'false',
+          'data-action': 'dlg-chunked'
+        },
+        (dlg.chunked ? '✓ ' : '') + '分片下载（显示进度与速度）'
+      ),
+      h(
+        'button',
+        {
+          type: 'button',
+          class: 'sd-chip-toggle' + (dlg.toastOnDone ? ' is-on' : ''),
+          role: 'switch',
+          'aria-checked': dlg.toastOnDone ? 'true' : 'false',
+          'data-action': 'dlg-toast'
+        },
+        (dlg.toastOnDone ? '✓ ' : '') + '完成后弹提示'
+      )
+    ])
+
+    return [songsBlock, qualityBlock, destBlock, nameBlock, extraBlock, dlg.error ? h('div', { class: 'sd-error', 'data-role': 'dlg-error' }, '✕ ' + dlg.error) : null]
+  }
+
+  /** 全局键盘：Esc 关闭确认框，Ctrl/Cmd+Enter 直接开始下载。
+   *  监听放在 activate 里注册（而不是组件 onMounted）—— teleport 出去的是独立 app 实例，
+   *  用全局监听既简单又能保证卸载时一定摘掉。 */
+  function onDialogKey(e) {
+    if (!dlg.open || !e) return
+    if (e.key === 'Escape') {
+      if (typeof e.preventDefault === 'function') e.preventDefault()
+      if (typeof e.stopPropagation === 'function') e.stopPropagation()
+      closeDownloadDialog()
+    } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      if (typeof e.preventDefault === 'function') e.preventDefault()
+      confirmDownloadDialog()
+    }
+  }
+
+  const DownloadDialog = V.defineComponent({
+    name: 'SongDownloaderDialog',
+    setup() {
+      return () => {
+        if (!dlg.open) return null
+        const count = dlg.tracks.length
+        return h(
+          'div',
+          {
+            class: 'sd-mask',
+            'data-role': 'download-dialog',
+            onClick: (e) => {
+              if (e.target === e.currentTarget) closeDownloadDialog()
+            }
+          },
+          [
+            h('div', { class: 'sd-dialog', onClick: (e) => e.stopPropagation() }, [
+              h('div', { class: 'sd-dialog-head' }, [
+                h('div', null, [
+                  h('h3', null, count > 1 ? '下载 ' + count + ' 首歌' : '下载歌曲'),
+                  h('p', { class: 'sd-muted' }, count > 1 ? '逐首下载，可随时在任务列表里停止' : '确认音质与保存位置后开始')
+                ]),
+                h(
+                  'button',
+                  { type: 'button', class: 'sd-dialog-close', 'data-action': 'dlg-close', title: '关闭（Esc）', onClick: () => closeDownloadDialog() },
+                  '✕'
+                )
+              ]),
+              h('div', { class: 'sd-dialog-body' }, renderDialogBody()),
+              h('div', { class: 'sd-dialog-foot' }, [
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    class: 'sd-chip-toggle' + (dlg.remember ? ' is-on' : ''),
+                    role: 'switch',
+                    'aria-checked': dlg.remember ? 'true' : 'false',
+                    'data-action': 'dlg-remember',
+                    title: '把这次的音质 / 文件名模板 / 下载选项记到插件设置里',
+                    onClick: () => {
+                      dlg.remember = !dlg.remember
+                    }
+                  },
+                  (dlg.remember ? '✓ ' : '') + '记住这些选项'
+                ),
+                h('div', { class: 'sd-dialog-actions' }, [
+                  h('button', { type: 'button', class: 'sd-btn', 'data-action': 'dlg-cancel', onClick: () => closeDownloadDialog() }, '取消'),
+                  h(
+                    'button',
+                    { type: 'button', class: 'sd-btn sd-btn-primary', 'data-action': 'dlg-confirm', onClick: () => confirmDownloadDialog() },
+                    count > 1 ? '开始下载（' + count + '）' : '开始下载'
+                  )
+                ])
+              ])
+            ])
+          ]
+        )
+      }
+    }
+  })
+
+  /* ---------------- 播放栏按钮 ---------------- */
+
+  let barMountDispose = null
+  let barObserveDispose = null
+  let barMutation = null
+  let barTimer = null
+  let barEnsureTimer = null
+  let barEnabled = false
+
+  const PlayerBarButton = V.defineComponent({
+    name: 'SongDownloaderBarButton',
+    setup() {
+      return () => {
+        const raw = currentTrack()
+        const track = raw ? toNormalized(raw) : null
+        const running = !!(
+          track &&
+          state.tasks.some(
+            (t) =>
+              t.trackId === track.id &&
+              (t.status === 'pending' || t.status === 'resolving' || t.status === 'downloading' || t.status === 'saving')
+          )
+        )
+        const disabled = !track || !!track.unsupported || running
+        const tip = !track
+          ? '当前没有正在播放的歌曲'
+          : track.unsupported
+            ? track.unsupported
+            : running
+              ? '正在下载这首…'
+              : '下载当前歌曲'
+        return h(
+          'button',
+          {
+            type: 'button',
+            class: 'sd-bar-btn',
+            'data-action': 'download-current-bar',
+            title: tip,
+            'aria-label': '下载当前歌曲',
+            disabled,
+            onClick: (e) => {
+              e.stopPropagation()
+              void downloadCurrent()
+            }
+          },
+          [
+            h(
+              'svg',
+              {
+                class: 'sd-bar-icon',
+                viewBox: '0 0 24 24',
+                width: '18',
+                height: '18',
+                fill: 'none',
+                stroke: 'currentColor',
+                'stroke-width': '1.8',
+                'stroke-linecap': 'round',
+                'stroke-linejoin': 'round',
+                'aria-hidden': 'true'
+              },
+              [
+                h('path', { d: 'M12 4v10' }),
+                h('path', { d: 'M8.4 10.6 12 14.2l3.6-3.6' }),
+                h('path', { d: 'M5 16.6v1.6A2.8 2.8 0 0 0 7.8 21h8.4A2.8 2.8 0 0 0 19 18.2v-1.6' })
+              ]
+            )
+          ]
+        )
+      }
+    }
+  })
+
+  /**
+   * 播放栏没有「插件按钮」这种一等公民 API，所以走宿主给的 DOM 挂载通道：
+   *   ctx.ui.mount('.player-actions', 组件)  —— 不需要自己 createElement/appendChild
+   * 重渲染兜底：宿主原地重渲会把我们塞进去的节点抹掉，dom.observe 不会为「同一个元素」再回调，
+   * 所以额外用 MutationObserver（防抖）+ 1.5s 轮询把按钮补回来。
+   */
+  function ensureBarButton() {
+    if (!barEnabled || typeof document === 'undefined' || typeof document.querySelector !== 'function') return
+    const host = document.querySelector('.player-actions') || document.querySelector('.player-bar')
+    if (!host || typeof host.querySelector !== 'function') return
+    if (host.querySelector('.sd-bar-btn')) return
+    if (typeof barMountDispose === 'function') {
+      try {
+        barMountDispose()
+      } catch {
+        /* 忽略 */
+      }
+    }
+    barMountDispose = null
+    try {
+      const dispose = ctx.ui && typeof ctx.ui.mount === 'function' ? ctx.ui.mount(host, PlayerBarButton) : null
+      barMountDispose = typeof dispose === 'function' ? dispose : null
+      log('已挂载播放栏下载按钮')
+    } catch (e) {
+      log('挂载播放栏按钮失败', e)
+    }
+  }
+
+  function scheduleEnsureBarButton() {
+    if (barEnsureTimer || !barEnabled) return
+    barEnsureTimer = setTimeout(() => {
+      barEnsureTimer = null
+      ensureBarButton()
+    }, 180)
+  }
+
+  function applyPlayerBarButton(enabled) {
+    barEnabled = !!enabled
+    if (barEnabled) {
+      if (!barObserveDispose && ctx.dom && typeof ctx.dom.observe === 'function') {
+        try {
+          const dispose = ctx.dom.observe('.player-actions', () => ensureBarButton())
+          barObserveDispose = typeof dispose === 'function' ? dispose : null
+        } catch (e) {
+          log('监听播放栏失败', e)
+        }
+      }
+      if (!barMutation && typeof MutationObserver === 'function') {
+        try {
+          barMutation = new MutationObserver(() => scheduleEnsureBarButton())
+          barMutation.observe(document.body, { childList: true, subtree: true })
+        } catch (e) {
+          barMutation = null
+          log('播放栏 MutationObserver 失败', e)
+        }
+      }
+      if (!barTimer) {
+        barTimer = setInterval(() => {
+          if (barEnabled) ensureBarButton()
+        }, 1500)
+      }
+      ensureBarButton()
+      return true
+    }
+    if (typeof barMountDispose === 'function') {
+      try {
+        barMountDispose()
+      } catch {
+        /* 忽略 */
+      }
+    }
+    barMountDispose = null
+    if (typeof barObserveDispose === 'function') {
+      try {
+        barObserveDispose()
+      } catch {
+        /* 忽略 */
+      }
+    }
+    barObserveDispose = null
+    if (barMutation) {
+      try {
+        barMutation.disconnect()
+      } catch {
+        /* 忽略 */
+      }
+      barMutation = null
+    }
+    if (barTimer) {
+      clearInterval(barTimer)
+      barTimer = null
+    }
+    if (barEnsureTimer) {
+      clearTimeout(barEnsureTimer)
+      barEnsureTimer = null
+    }
+    return true
+  }
+
   /* ---------------- 注册 ---------------- */
 
   let sidebarDispose = null
   let toolbarDispose = null
   let settingsDispose = null
+  let dialogDispose = null
 
   function applySidebarEntry(enabled) {
     if (enabled) {
@@ -1969,9 +2527,29 @@ export async function activate(ctx) {
 
   settingsDispose = ctx.ui.settings.define({
     title: '歌曲下载 设置',
-    description: '默认音质、保存方式、文件名模板与下载性能选项。',
+    description: '默认音质、下载确认框、保存方式、播放栏按钮与下载性能选项。',
     component: SettingsPanel
   })
+
+  // 下载确认框挂在 document.body 上：插件页/设置弹窗都有 overflow:hidden 的祖先，
+  // 就地渲染会被裁掉；宿主的 ui.teleport 会以 .echo-plugin-teleport 追加到 body。
+  try {
+    if (ctx.ui && typeof ctx.ui.teleport === 'function') {
+      dialogDispose = ctx.ui.teleport(DownloadDialog, { id: PLUGIN_ID + '-dialog', className: 'sd-teleport' })
+    }
+  } catch (e) {
+    log('挂载下载确认框失败', e)
+  }
+
+  try {
+    if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+      document.addEventListener('keydown', onDialogKey, true)
+    }
+  } catch (e) {
+    log('注册 Esc 快捷键失败', e)
+  }
+
+  applyPlayerBarButton(state.settings.playerBarButton)
 
   if (ctx.commands && typeof ctx.commands.register === 'function') {
     ctx.commands.register('download-current', () => void downloadCurrent(), { title: '下载当前播放的歌曲' })
@@ -2044,6 +2622,23 @@ export async function activate(ctx) {
       }
     }
     settingsDispose = null
+    if (typeof dialogDispose === 'function') {
+      try {
+        dialogDispose()
+      } catch {
+        /* 忽略 */
+      }
+    }
+    dialogDispose = null
+    try {
+      if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function') {
+        document.removeEventListener('keydown', onDialogKey, true)
+      }
+    } catch {
+      /* 忽略 */
+    }
+    applyPlayerBarButton(false)
+    closeDownloadDialog()
     log('已停用并回收资源')
   })
 
@@ -2051,9 +2646,15 @@ export async function activate(ctx) {
 
   return {
     state,
+    dlg,
     downloadCurrent,
     downloadCurrentAs,
     startDownloads,
+    openDownloadDialog,
+    closeDownloadDialog,
+    confirmDownloadDialog,
+    chooseSaveTarget,
+    dlgPreviewName,
     cancelAll,
     cancelTask,
     retryTask,
@@ -2065,7 +2666,8 @@ export async function activate(ctx) {
     resolveAudio,
     currentTrack,
     readQueue,
-    toNormalized
+    toNormalized,
+    ensureBarButton
   }
 }
 

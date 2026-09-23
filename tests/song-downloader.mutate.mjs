@@ -18,11 +18,13 @@ import { fileURLToPath } from 'node:url'
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '..')
 const SRC = path.join(ROOT, 'song-downloader', 'index.js')
+const SRC_CSS = path.join(ROOT, 'song-downloader', 'style.css')
 const TEST = path.join(HERE, 'song-downloader.smoke.mjs')
 const TMP_DIR = path.join(ROOT, '.workbuddy', 'tmp', 'sd-mutants')
 const NODE = process.execPath
 
-/** 每个变异：名字 + 「原文 → 改坏后」的替换对（必须能在原文里精确命中） */
+/** 每个变异：名字 + 「原文 → 改坏后」的替换对（必须能在原文里精确命中）
+ *  file: 'js'（默认，插件主文件）| 'css'（样式：测试通过 SD_CSS_ENTRY 读副本） */
 const MUTANTS = [
   {
     name: '128 档不走「主 hash」特例（直接取 relateGoods 第一条，会拿到别的音质的文件）',
@@ -92,10 +94,83 @@ const MUTANTS = [
       /* 忽略 */
     }`,
     to: `    void state.notice`
+  },
+  {
+    name: '设置根节点又变成自带滚动（宿主弹窗里整页滚不动 —— 1.0.0 的真实 bug）',
+    file: 'css',
+    from: `.sd-settings {
+  display: block;
+  padding: 2px 0 10px;
+}`,
+    to: `.sd-settings {
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  display: block;
+  padding: 2px 0 10px;
+}`
+  },
+  {
+    name: '插件页不再自己滚（.plugin-page-host 有确定高度，内容会被裁掉）',
+    file: 'css',
+    from: `.sd-page {
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;`,
+    to: `.sd-page {
+  min-height: 0;`
+  },
+  {
+    name: '确认框被绕过（点下载直接开下，用户改不了音质/位置）',
+    from: `    if (!state.settings.confirmBeforeDownload) {`,
+    to: `    if (true) {`
+  },
+  {
+    name: '确认框的音质选择被忽略（用设置里的旧值去下载）',
+    from: `    const quality = dlg.quality
+    const useHandle = dlg.destination === 'picker' ? saveHandleRef : null`,
+    to: `    const quality = state.settings.quality
+    const useHandle = dlg.destination === 'picker' ? saveHandleRef : null`
+  },
+  {
+    name: '「记住这些选项」失效（勾了也不写回设置）',
+    from: `    if (dlg.remember) {
+      setSetting('quality', quality)`,
+    to: `    if (false) {
+      setSetting('quality', quality)`
+  },
+  {
+    name: 'Esc 不关确认框',
+    from: `    if (e.key === 'Escape') {
+      if (typeof e.preventDefault === 'function') e.preventDefault()`,
+    to: `    if (false) {
+      if (typeof e.preventDefault === 'function') e.preventDefault()`
+  },
+  {
+    name: '播放栏按钮不做去重（重复回调会挂出第二个按钮）',
+    from: `    if (host.querySelector('.sd-bar-btn')) return`,
+    to: `    if (false) return`
+  },
+  {
+    name: '去掉播放栏重渲染兜底（宿主重渲一次按钮就永远消失）',
+    from: `          barMutation = new MutationObserver(() => scheduleEnsureBarButton())`,
+    to: `          barMutation = new MutationObserver(() => {})`
+  },
+  {
+    name: '关掉播放栏开关时不卸载（按钮留在界面上，开关变成摆设）',
+    from: `    barMountDispose = null
+    if (typeof barObserveDispose === 'function') {`,
+    to: `    barMountDispose = null
+    if (false) {`
+  },
+  {
+    name: '设置里切播放栏开关不生效',
+    from: `    if (key === 'playerBarButton') applyPlayerBarButton(!!value)`,
+    to: `    void (key === 'playerBarButton')`
   }
 ]
 
-const original = fs.readFileSync(SRC, 'utf8')
+const originals = { js: fs.readFileSync(SRC, 'utf8'), css: fs.readFileSync(SRC_CSS, 'utf8') }
 fs.mkdirSync(TMP_DIR, { recursive: true })
 
 const rows = []
@@ -103,28 +178,36 @@ let missed = 0
 let skipped = 0
 
 for (const mutant of MUTANTS) {
+  const kind = mutant.file || 'js'
+  const original = originals[kind]
   if (!original.includes(mutant.from)) {
     skipped += 1
     rows.push('⚠ 跳过（原文没命中，需更新变异定义）：' + mutant.name)
     continue
   }
-  const file = path.join(TMP_DIR, 'mutant-' + Math.abs(hashCode(mutant.name)) + '.js')
   const patched = original.replace(mutant.from, mutant.to)
   if (patched === original) {
     skipped += 1
     rows.push('⚠ 跳过（替换后内容不变）：' + mutant.name)
     continue
   }
+  const file = path.join(TMP_DIR, 'mutant-' + Math.abs(hashCode(mutant.name)) + (kind === 'css' ? '.css' : '.js'))
   fs.writeFileSync(file, patched, 'utf8')
+
+  const env = { ...process.env, SD_REPORT: path.join(TMP_DIR, 'report-' + Math.abs(hashCode(mutant.name)) + '.txt') }
+  if (kind === 'css') {
+    // 样式变异走 SD_CSS_ENTRY（测试按这个路径读 CSS 副本），插件本体仍用真文件
+    delete env.SD_PLUGIN_ENTRY
+    env.SD_CSS_ENTRY = file
+  } else {
+    delete env.SD_CSS_ENTRY
+    env.SD_PLUGIN_ENTRY = file
+  }
 
   let caught = false
   let evidence = ''
   try {
-    execFileSync(NODE, [TEST], {
-      env: { ...process.env, SD_PLUGIN_ENTRY: file, SD_REPORT: path.join(TMP_DIR, 'report.txt') },
-      encoding: 'utf8',
-      stdio: 'pipe'
-    })
+    execFileSync(NODE, [TEST], { env, encoding: 'utf8', stdio: 'pipe' })
   } catch (error) {
     caught = true
     const out = String(error.stdout || '')

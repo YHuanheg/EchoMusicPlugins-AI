@@ -99,6 +99,21 @@ globalThis.clearTimeout = realClearTimeout
 
 const tick = () => new Promise((r) => realSetTimeout(r, 1))
 
+/** 看门狗：任何环节挂死时也要把已有结果落盘（否则只能被外部 SIGTERM，什么都看不到） */
+function startWatchdog(seconds) {
+  const t = realSetTimeout(() => {
+    say('看门狗触发：流程卡住超过 ' + seconds + 's')
+    say('通过：' + pass)
+    if (failures.length) {
+      say('失败：' + failures.length)
+      for (const f of failures) say('  ✗ ' + f)
+    }
+    flushReport()
+    process.exit(1)
+  }, seconds * 1000)
+  if (t && typeof t.unref === 'function') t.unref()
+}
+
 /** 结果同时落一份到文件：PowerShell 的 stdout 编码会吃掉中文，靠文件读回更稳 */
 const REPORT = process.env.SD_REPORT || path.join(CACHE_DIR, 'sd-smoke-report.txt')
 const reportLines = []
@@ -125,60 +140,193 @@ async function waitFor(pred, label, tries = 400) {
 
 /* ========================================================================== *
  * 假 DOM（只实现插件用到的那部分）
+ * --------------------------------------------------------------------------
+ * 插件真正碰过的 DOM 能力：createElement('a'/'textarea') + body + execCommand
+ * （落盘与剪贴板），以及播放栏按钮要用的 querySelector / classList。
+ * 这套假 DOM 存在的意义是让「按钮有没有被真的挂上去、被抹掉后会不会补回来」
+ * 这类问题能在无头环境里被测到。
  * ========================================================================== */
 
-const doc = {
-  body: {
-    children: [],
-    appendChild(node) {
-      this.children.push(node)
-      node.parentNode = this
-      return node
-    },
-    removeChild(node) {
-      const i = this.children.indexOf(node)
-      if (i >= 0) this.children.splice(i, 1)
-      node.parentNode = null
-      return node
-    }
-  },
-  createElement(tag) {
-    const el = {
-      tagName: String(tag).toUpperCase(),
-      parentNode: null,
-      style: {},
-      value: '',
-      href: '',
-      download: '',
-      rel: '',
-      clicked: 0,
-      focused: false,
-      selected: false,
-      focus() {
-        this.focused = true
-      },
-      select() {
-        this.selected = true
-      },
-      click() {
-        this.clicked += 1
-        doc.clicks.push(el)
-      },
-      remove() {
-        if (this.parentNode) this.parentNode.removeChild(this)
+class FEl {
+  constructor(tag) {
+    this.tagName = String(tag).toUpperCase()
+    this.children = []
+    this.parentNode = null
+    this._classes = new Set()
+    this.style = {}
+    this.dataset = {}
+    this._attrs = new Map()
+    this._text = ''
+    this.value = ''
+    this.href = ''
+    this.download = ''
+    this.rel = ''
+    this.disabled = false
+    this.clicked = 0
+    this.focused = false
+    this.selected = false
+  }
+
+  get className() {
+    return Array.from(this._classes).join(' ')
+  }
+
+  set className(value) {
+    this._classes = new Set(
+      String(value || '')
+        .split(/\s+/)
+        .filter(Boolean)
+    )
+  }
+
+  get classList() {
+    const self = this
+    return {
+      add: (...names) => names.forEach((n) => self._classes.add(String(n))),
+      remove: (...names) => names.forEach((n) => self._classes.delete(String(n))),
+      contains: (n) => self._classes.has(String(n)),
+      toggle: (n, force) => {
+        const has = self._classes.has(String(n))
+        const want = force === undefined ? !has : !!force
+        if (want) self._classes.add(String(n))
+        else self._classes.delete(String(n))
+        return want
       }
     }
-    return el
-  },
+  }
+
+  setAttribute(name, value) {
+    this._attrs.set(String(name), String(value))
+    if (String(name).startsWith('data-')) {
+      this.dataset[String(name).slice(5).replace(/-([a-z])/g, (m, c) => c.toUpperCase())] = String(value)
+    }
+  }
+
+  getAttribute(name) {
+    return this._attrs.has(String(name)) ? this._attrs.get(String(name)) : null
+  }
+
+  appendChild(child) {
+    if (child.parentNode) child.parentNode.removeChild(child)
+    this.children.push(child)
+    child.parentNode = this
+    return child
+  }
+
+  removeChild(child) {
+    const i = this.children.indexOf(child)
+    if (i >= 0) this.children.splice(i, 1)
+    child.parentNode = null
+    return child
+  }
+
+  remove() {
+    if (this.parentNode) this.parentNode.removeChild(this)
+  }
+
+  /** 只支持 `.class` 选择器（插件就用了这一种） */
+  querySelector(selector) {
+    return this.querySelectorAll(selector)[0] || null
+  }
+
+  querySelectorAll(selector) {
+    const cls = String(selector).replace(/^\./, '')
+    return descendantsOf(this).filter((el) => el._classes && el._classes.has(cls))
+  }
+
+  get textContent() {
+    let out = this._text || ''
+    for (const child of this.children) out += child.textContent
+    return out
+  }
+
+  set textContent(value) {
+    this._text = String(value === undefined || value === null ? '' : value)
+  }
+
+  focus() {
+    this.focused = true
+  }
+
+  select() {
+    this.selected = true
+  }
+
+  click() {
+    this.clicked += 1
+    doc.clicks.push(this)
+  }
+}
+
+function descendantsOf(node, out = []) {
+  for (const child of node.children || []) {
+    out.push(child)
+    descendantsOf(child, out)
+  }
+  return out
+}
+
+const doc = {
+  body: new FEl('body'),
+  head: new FEl('head'),
+  documentElement: new FEl('html'),
   clicks: [],
   execCommandFails: false,
   execCommands: [],
+  keyHandlers: [],
+  createElement(tag) {
+    return new FEl(tag)
+  },
+  querySelector(selector) {
+    return doc.body.querySelector(selector)
+  },
+  querySelectorAll(selector) {
+    return doc.body.querySelectorAll(selector)
+  },
+  addEventListener(type, fn) {
+    if (type === 'keydown') doc.keyHandlers.push(fn)
+  },
+  removeEventListener(type, fn) {
+    if (type === 'keydown') {
+      const i = doc.keyHandlers.indexOf(fn)
+      if (i >= 0) doc.keyHandlers.splice(i, 1)
+    }
+  },
+  /** 模拟按下按键（走插件注册的全局 keydown 监听） */
+  pressKey(key, extra) {
+    const ev = { key, ctrlKey: false, metaKey: false, prevented: 0, stopped: 0, preventDefault() { this.prevented += 1 }, stopPropagation() { this.stopped += 1 }, ...(extra || {}) }
+    for (const fn of doc.keyHandlers.slice()) fn(ev)
+    return ev
+  },
   execCommand(cmd) {
     if (cmd === 'copy') {
       doc.execCommands.push(cmd)
       return !doc.execCommandFails
     }
     return false
+  }
+}
+
+/** MutationObserver 替身：记录实例，测试里手动触发回调 */
+const observers = []
+class FakeMutationObserver {
+  constructor(cb) {
+    this.cb = cb
+    this.active = false
+    this.options = null
+    this.target = null
+    observers.push(this)
+  }
+  observe(target, options) {
+    this.active = true
+    this.target = target
+    this.options = options
+  }
+  disconnect() {
+    this.active = false
+  }
+  trigger() {
+    if (this.active) this.cb([], this)
   }
 }
 
@@ -197,6 +345,27 @@ function defineGlobal(name, value) {
 defineGlobal('document', doc)
 defineGlobal('window', {}) // 默认没有 showSaveFilePicker
 defineGlobal('navigator', {})
+defineGlobal('MutationObserver', FakeMutationObserver)
+
+// 插件在 activate 里会起轮询（心跳 500ms / 播放栏 1.5s），全部记账，收尾时统一清掉，
+// 否则进程会一直挂着不退出。
+const liveIntervals = []
+const realSetInterval = globalThis.setInterval
+const realClearInterval = globalThis.clearInterval
+globalThis.setInterval = (fn, ms, ...rest) => {
+  const id = realSetInterval(fn, ms, ...rest)
+  liveIntervals.push(id)
+  return id
+}
+globalThis.clearInterval = (id) => {
+  const i = liveIntervals.indexOf(id)
+  if (i >= 0) liveIntervals.splice(i, 1)
+  return realClearInterval(id)
+}
+function clearAllIntervals() {
+  for (const id of liveIntervals.splice(0)) realClearInterval(id)
+}
+
 globalThis.URL.createObjectURL = (blob) => {
   objectUrlSeq += 1
   lastBlob = blob
@@ -373,11 +542,24 @@ function makeCtx(options) {
     settings: [],
     commands: [],
     toasts: [],
+    teleports: [],
+    teleportDisposals: 0,
+    mounts: [],
+    mountDisposals: 0,
+    observes: [],
     sidebarDisposals: 0,
     toolbarDisposals: 0,
     disposers: []
   }
   const currentTrack = V.ref(o.currentTrack === undefined ? FLAC_TRACK : o.currentTrack)
+  // 播放栏容器（宿主那边是 `.player-actions` 右侧动作区）。
+  // 默认**不**建：真实场景里它是后出现的，插件必须先等宿主把页面渲染出来。
+  if (o.withBarHost) {
+    const host = doc.createElement('div')
+    host.className = 'player-actions'
+    doc.body.appendChild(host)
+    records.barHost = host
+  }
   // 队列必须放进 ref：宿主那边 activeQueue 是 pinia 响应式对象，
   // 用普通变量模拟的话「队列变化 → 界面更新」这条链路根本触发不了，测不出真问题。
   const queueRef = V.ref(o.queue || [FLAC_TRACK, LOW_TRACK])
@@ -418,6 +600,48 @@ function makeCtx(options) {
           return () => {
             records.settingsDisposals = (records.settingsDisposals || 0) + 1
           }
+        }
+      },
+      /** 宿主把浮层组件挂到 document.body（.echo-plugin-teleport） */
+      teleport(component, options) {
+        const entry = { component, options, disposed: false }
+        records.teleports.push(entry)
+        // 真实宿主会用独立 app 实例渲染到 body；这里塞一个占位节点表示「已挂载」
+        const holder = doc.createElement('div')
+        holder.className = 'echo-plugin-teleport'
+        doc.body.appendChild(holder)
+        return () => {
+          entry.disposed = true
+          records.teleportDisposals += 1
+          holder.remove()
+        }
+      },
+      /** 宿主把组件挂进某个 DOM 容器（.player-actions 等） */
+      mount(host, component, options) {
+        const entry = { host, component, options }
+        const marker = doc.createElement('div')
+        marker.className = 'sd-bar-btn'
+        host.appendChild(marker)
+        entry.marker = marker
+        try {
+          entry.vnode = component.setup({}, {})()
+        } catch (e) {
+          entry.renderError = e
+        }
+        records.mounts.push(entry)
+        return () => {
+          entry.disposed = true
+          records.mountDisposals += 1
+          marker.remove()
+        }
+      }
+    },
+    dom: {
+      observe(selector, cb) {
+        const entry = { selector, cb, disposed: false }
+        records.observes.push(entry)
+        return () => {
+          entry.disposed = true
         }
       }
     },
@@ -504,6 +728,11 @@ function propOf(tree, prop, value, read) {
   return n ? n.props[read] : undefined
 }
 
+/** 按 data-group + data-value 找选项 chip（音质 / 保存位置） */
+function findOption(tree, group, value) {
+  return walk(tree).find((n) => n.props && n.props['data-group'] === group && n.props['data-value'] === value) || null
+}
+
 /** 渲染一个 defineComponent 的 setup → vnode 树 */
 function renderOf(component) {
   const render = component.setup({}, {})
@@ -515,6 +744,7 @@ function renderOf(component) {
  * ========================================================================== */
 
 async function main() {
+  startWatchdog(60)
   const mod = await import(pathToFileURL(PLUGIN_ENTRY).href)
   const I = mod.__internals
 
@@ -594,9 +824,40 @@ async function main() {
 
   const page = first.records.pages[0].component
   const settingsPanel = first.records.settings[0].component
+  const dialogComponent = first.records.teleports[0] && first.records.teleports[0].component
+  eq(!!dialogComponent, true, '下载确认框已 teleport 到 body')
+  eq(first.records.teleports[0].options.className, 'sd-teleport', 'teleport 带了插件自己的类名')
+
+  section('3b. 播放栏按钮：挂载时机与去重')
+  eq(first.records.observes.length >= 1, true, '监听了 .player-actions')
+  eq(first.records.observes[0].selector, '.player-actions', '监听的是播放栏右侧动作区')
+  eq(first.records.mounts.length, 0, '宿主页面还没出现时不会盲目挂载')
+  const barHost = doc.createElement('div')
+  barHost.className = 'player-actions'
+  doc.body.appendChild(barHost)
+  first.records.barHost = barHost
+  first.records.observes[0].cb()
+  eq(first.records.mounts.length, 1, '宿主出现后挂上按钮')
+  eq(first.records.mounts[0].host, first.records.barHost, '挂进的是 .player-actions')
+  eq(first.records.barHost.querySelector('.sd-bar-btn') !== null, true, '宿主容器里能看到按钮节点')
+  first.records.observes[0].cb()
+  eq(first.records.mounts.length, 1, '重复回调不会挂第二个（去重）')
+
+  // 宿主原地重渲会把节点抹掉：MutationObserver 兜底要能补回来
+  first.records.mounts[0].marker.remove()
+  eq(first.records.barHost.querySelector('.sd-bar-btn'), null, '模拟宿主把按钮抹掉')
+  const barObserver = observers.find((o) => o.active && o.options && o.options.subtree)
+  ok(!!barObserver, '注册了 MutationObserver 兜底')
+  barObserver.trigger()
+  await new Promise((r) => realSetTimeout(r, 260))
+  eq(first.records.mounts.length, 2, '节点被抹掉后自动补挂')
+  eq(first.records.barHost.querySelector('.sd-bar-btn') !== null, true, '按钮回来了')
 
   /* -------------------------------------------------- 4. 无歌 / 空队列的降级 */
   section('4. 没有在播歌曲时的降级')
+  // 后面的下载流程要先关掉确认框（它默认是开的，会拦住所有一键下载）。
+  // 确认框本身在第 22 段单独测。
+  apiOut.state.settings.confirmBeforeDownload = false
   first.records.currentTrack.value = null
   net.file = makeBytes(1024 * 1024)
   let tree = renderOf(page)
@@ -983,7 +1244,7 @@ async function main() {
   eq(findByProp(sTree, 'data-setting', 'chunked') !== null, true, '有分片开关')
   eq(findByProp(sTree, 'data-setting', 'quality') !== null, true, '有音质选项')
   eq(findByProp(sTree, 'data-setting', 'fileNameTemplate') !== null, true, '有文件名模板输入')
-  eq(countByProp(sTree, 'role', 'switch'), 5, '5 个开关（分片/完成提示/侧边栏/工具栏/调试）')
+  eq(countByProp(sTree, 'role', 'switch'), 7, '7 个开关（确认框/分片/完成提示/侧边栏/工具栏/播放栏/调试）')
 
   const chunkSwitch = findByProp(sTree, 'data-setting', 'chunked')
   const innerSwitch = walk(chunkSwitch).find((n) => n.props && n.props.role === 'switch')
@@ -1049,20 +1310,251 @@ async function main() {
   await waitFor(() => apiOut.state.tasks.length === beforeCmd + 1, '命令创建了任务')
   await waitFor(() => apiOut.state.tasks.every((t) => t.status !== 'downloading' && t.status !== 'resolving' && t.status !== 'saving'), '命令任务完成')
 
-  // dispose 必须真正中断在跑的任务（用一个大文件确保 dispose 时任务还在跑）
+  // 注意：dispose 会摘掉全局 keydown 监听，所以「回收」放到最后一段再测（见 25）
+  const runsBeforeDispose = apiOut.state.tasks.length
+  ok(runsBeforeDispose > 0, 'dispose 之前累积了任务', { count: runsBeforeDispose })
+
+  /* ------------------------------------------------------------ 21. 长延时压缩 */
+  ok(longDelays.length > 0, '确实出现过长延时（已压成 0）', { longDelays })
+
+  /* -------------------------------------------------- 21. 设置页滚动契约 */
+  section('21. 设置页必须交给宿主滚动（CSS 契约）')
+  {
+    const cssPath = process.env.SD_CSS_ENTRY ? path.resolve(process.env.SD_CSS_ENTRY) : path.join(ROOT, 'song-downloader', 'style.css')
+    const css = fs.readFileSync(cssPath, 'utf8')
+    const blockOf = (selector) => {
+      const i = css.indexOf('\n' + selector + ' {')
+      if (i < 0) return null
+      const end = css.indexOf('}', i)
+      return css.slice(i, end)
+    }
+    const settings = blockOf('.sd-settings')
+    const pageBlock = blockOf('.sd-page')
+    ok(!!settings, '找得到 .sd-settings 规则')
+    ok(!!pageBlock, '找得到 .sd-page 规则')
+    // 这就是 1.0.0 的 bug：设置根节点自带 height:100% + overflow-y:auto，
+    // 在宿主的弹窗滚动容器里会变成「自己高度=内容高度 → 谁也不滚」。
+    eq(/height\s*:\s*100%/.test(settings), false, '设置根节点不能写 height:100%（否则宿主弹窗里整页滚不动）')
+    eq(/overflow-y\s*:\s*auto/.test(settings), false, '设置根节点不能自带纵向滚动')
+    eq(/overflow\s*:\s*(auto|scroll)/.test(settings), false, '设置根节点不能自带滚动')
+    eq(/height\s*:\s*100%/.test(pageBlock), true, '插件页仍要按宿主约定自己滚（.plugin-page-host 有确定高度）')
+    eq(/overflow-y\s*:\s*auto/.test(pageBlock), true, '插件页自己当滚动容器')
+    includes(css, '.plugin-page-host', 'CSS 里写明了宿主容器语义（防止后人又合并这两条规则）')
+  }
+
+  /* -------------------------------------------------- 22. 下载确认框 */
+  section('22. 下载确认框：内容、选项与开关')
+  apiOut.state.settings.confirmBeforeDownload = true
+  apiOut.state.settings.quality = 'auto'
+  first.records.currentTrack.value = FLAC_TRACK
+  await waitFor(() => apiOut.state.tasks.every((t) => t.status !== 'downloading' && t.status !== 'resolving' && t.status !== 'saving'), '先等任务收敛')
+  const tasksBeforeDlg = apiOut.state.tasks.length
+
+  tree = renderOf(page)
+  await findByProp(tree, 'data-action', 'download-current').props.onClick()
+  eq(apiOut.state.tasks.length, tasksBeforeDlg, '弹确认框时不直接开下')
+  eq(apiOut.dlg.open, true, '确认框已打开')
+  eq(apiOut.dlg.tracks.length, 1, '带上了 1 首歌')
+
+  let dTree = renderOf(dialogComponent)
+  eq(findByProp(dTree, 'data-role', 'download-dialog') !== null, true, '渲染出遮罩 + 弹窗')
+  includes(textOf(dTree), '下载歌曲', '标题为「下载歌曲」')
+  includes(textOf(dTree), '涂一乐', '显示了歌手')
+  includes(
+    walk(dTree)
+      .filter((n) => n.props && n.props['data-group'] === 'quality')
+      .map((n) => n.children)
+      .join('|'),
+    '自动（最优可用）',
+    '音质选项里有「自动」'
+  )
+  eq(findAllByProp(dTree, 'data-group', 'quality').length, 6, '6 档音质')
+  eq(findAllByProp(dTree, 'data-group', 'dest').length, 2, '2 个保存位置选项')
+  eq(findByProp(dTree, 'data-role', 'dlg-preview') !== null, true, '渲染了文件名预览')
+  includes(textOf(dTree), '将保存为：', '预览文案')
+  includes(textOf(dTree), '涂一乐 - 花落叹', '预览里是模板生成的文件名')
+  includes(textOf(dTree), '系统下载目录', '说明保存位置')
+  eq(propOf(dTree, 'data-action', 'dlg-remember', 'aria-checked'), 'true', '「记住这些选项」默认勾选')
+
+  // 换音质 → 预览的扩展名跟着变
+  await findOption(dTree, 'quality', '320').props.onClick()
+  eq(apiOut.dlg.quality, '320', '音质切到 320')
+  dTree = renderOf(dialogComponent)
+  includes(textOf(dTree), '.mp3', '预览扩展名跟着音质变')
+  await findOption(dTree, 'quality', 'flac').props.onClick()
+  eq(apiOut.dlg.quality, 'flac', '音质切回 flac')
+
+  // 「选择位置…」→ 走系统保存对话框（单曲）
+  const writtenDlg = []
+  window.showSaveFilePicker = async (opts) => {
+    window.__dlgPicker = opts
+    return {
+      name: 'D:/音乐/' + opts.suggestedName,
+      async createWritable() {
+        return {
+          async write(blob) {
+            writtenDlg.push(Buffer.from(await blob.arrayBuffer()))
+          },
+          async close() {}
+        }
+      }
+    }
+  }
+  net.mode = 'range'
+  net.file = makeBytes(420 * 1024, 43)
+  await findOption(renderOf(dialogComponent), 'dest', 'picker').props.onClick()
+  await tick()
+  eq(apiOut.dlg.destination, 'picker', '切到「选择位置」')
+  includes(apiOut.dlg.pickedName, 'D:/音乐/', '记下了选中的文件名')
+  dTree = renderOf(dialogComponent)
+  includes(textOf(dTree), '将保存到：', '显示将保存到哪里')
+
+  // 开始下载：应带上弹窗里的音质与句柄
+  api.calls.length = 0
+  await findByProp(dTree, 'data-action', 'dlg-confirm').props.onClick()
+  eq(apiOut.dlg.open, false, '确认后关闭弹窗')
+  await waitFor(() => apiOut.state.tasks.length === tasksBeforeDlg + 1, '创建了任务')
+  const dlgTask = apiOut.state.tasks[apiOut.state.tasks.length - 1]
+  await waitFor(() => dlgTask.status === 'done', '弹窗发起的任务完成')
+  eq(api.calls[0].params.quality, 'flac', '用弹窗里选的音质请求地址')
+  eq(dlgTask.saveMethod, 'picker', '用弹窗里选的保存位置落盘')
+  eq(writtenDlg.length, 1, '写入到用户选的位置')
+  eq(writtenDlg[0].equals(net.file), true, '写入字节正确')
+  eq(apiOut.state.settings.quality, 'flac', '「记住这些选项」把音质写回了设置')
+  eq(first.records.storage.get('settings').quality, 'flac', '并持久化')
+  delete window.showSaveFilePicker
+
+  // 取消：不产生任何任务
+  const beforeCancel2 = apiOut.state.tasks.length
+  tree = renderOf(page)
+  await findByProp(tree, 'data-action', 'download-current').props.onClick()
+  dTree = renderOf(dialogComponent)
+  await findByProp(dTree, 'data-action', 'dlg-cancel').props.onClick()
+  eq(apiOut.dlg.open, false, '取消后关闭')
+  eq(apiOut.state.tasks.length, beforeCancel2, '取消不创建任务')
+
+  // Esc / Ctrl+Enter / 点遮罩
+  await findByProp(renderOf(page), 'data-action', 'download-current').props.onClick()
+  eq(apiOut.dlg.open, true, '再次打开')
+  const escEv = doc.pressKey('Escape')
+  eq(apiOut.dlg.open, false, 'Esc 关闭确认框')
+  eq(escEv.prevented, 1, 'Esc 被 preventDefault')
+  await findByProp(renderOf(page), 'data-action', 'download-current').props.onClick()
+  const beforeEscTask = apiOut.state.tasks.length
+  doc.pressKey('Enter', { ctrlKey: true })
+  eq(apiOut.dlg.open, false, 'Ctrl+Enter 直接开始下载')
+  eq(apiOut.state.tasks.length, beforeEscTask + 1, 'Ctrl+Enter 创建了任务')
+  await findByProp(renderOf(page), 'data-action', 'download-current').props.onClick()
+  dTree = renderOf(dialogComponent)
+  const mask = findByProp(dTree, 'data-role', 'download-dialog')
+  mask.props.onClick({ target: mask, currentTarget: mask })
+  eq(apiOut.dlg.open, false, '点遮罩关闭')
+  eq(first.records.teleportDisposals >= 0, true, 'teleport 有卸载入口')
+
+  // 关掉「记住」就不写回设置
+  apiOut.state.settings.quality = 'auto'
+  tree = renderOf(page)
+  await findByProp(tree, 'data-action', 'download-current').props.onClick()
+  dTree = renderOf(dialogComponent)
+  await findOption(dTree, 'quality', '128').props.onClick()
+  await findByProp(renderOf(dialogComponent), 'data-action', 'dlg-remember').props.onClick()
+  await findByProp(renderOf(dialogComponent), 'data-action', 'dlg-confirm').props.onClick()
+  eq(apiOut.state.settings.quality, 'auto', '关掉「记住」后设置不被改写')
+  await waitFor(() => apiOut.state.tasks.every((t) => t.status !== 'downloading' && t.status !== 'resolving' && t.status !== 'saving'), '任务收敛')
+
+  // 批量：带多首歌 + 「选择位置」不可用
+  first.records.setQueue([FLAC_TRACK, LOW_TRACK])
+  await tick()
+  const multi = apiOut.openDownloadDialog([FLAC_TRACK, LOW_TRACK])
+  eq(multi.tracks.length, 2, '批量带 2 首')
+  dTree = renderOf(dialogComponent)
+  includes(textOf(dTree), '下载 2 首歌', '标题显示数量')
+  eq(findOption(dTree, 'dest', 'picker').props.disabled, true, '批量下载时「选择位置」被禁用')
+  eq(findOption(dTree, 'dest', 'downloads').props['aria-checked'], 'true', '默认落在系统下载目录')
+  eq(findAllByProp(dTree, 'data-action', 'dlg-confirm')[0].children, '开始下载（2）', '按钮显示数量')
+  apiOut.closeDownloadDialog()
+  eq(apiOut.dlg.open, false, 'closeDownloadDialog 可关闭')
+
+  // 上游不支持时（云盘歌）直接提示、不弹框
+  first.records.currentTrack.value = CLOUD_TRACK
+  const toastsBefore = first.records.toasts.length
+  await apiOut.downloadCurrent()
+  eq(apiOut.dlg.open, false, '云盘歌曲不弹确认框')
+  ok(first.records.toasts.length > toastsBefore, '给出原因提示')
+  first.records.currentTrack.value = FLAC_TRACK
+
+  /* -------------------------------------------------- 23. 播放栏按钮行为 */
+  section('23. 播放栏按钮：点击 / 置灰 / 开关')
+  const barEntry = first.records.mounts[first.records.mounts.length - 1]
+  const barTree = barEntry.vnode
+  const barBtn = findByProp(barTree, 'data-action', 'download-current-bar')
+  ok(!!barBtn, '按钮 vnode 找得到')
+  eq(barBtn.props.disabled, false, '有歌在播时可点')
+  eq(typeof barBtn.props.title, 'string', '带 tooltip')
+  const barSvg = walk(barTree).filter((n) => n.type === 'svg')
+  eq(barSvg.length >= 1, true, '用了内联 SVG 图标（不依赖宿主 icons）')
+
+  apiOut.state.settings.confirmBeforeDownload = true
+  await barBtn.props.onClick({ stopPropagation() {} })
+  eq(apiOut.dlg.open, true, '点播放栏按钮会拉起确认框')
+  apiOut.closeDownloadDialog()
+
+  first.records.currentTrack.value = null
+  const barTree2 = barEntry.component.setup({}, {})()
+  eq(findByProp(barTree2, 'data-action', 'download-current-bar').props.disabled, true, '没歌在播时置灰')
+  includes(String(findByProp(barTree2, 'data-action', 'download-current-bar').props.title), '没有正在播放', '置灰时说明原因')
+  first.records.currentTrack.value = FLAC_TRACK
+
+  const mountsBefore = first.records.mounts.length
+  apiOut.state.settings.confirmBeforeDownload = false
+  const panelTree = renderOf(settingsPanel)
+  const barSwitch = walk(findByProp(panelTree, 'data-setting', 'playerBarButton')).find((n) => n.props && n.props.role === 'switch')
+  eq(!!barSwitch, true, '设置里有播放栏开关')
+  barSwitch.props.onClick()
+  eq(apiOut.state.settings.playerBarButton, false, '关掉播放栏按钮')
+  eq(first.records.barHost.querySelector('.sd-bar-btn'), null, '节点被移除')
+  eq(first.records.mountDisposals >= 1, true, '调用了卸载函数')
+  const switch2 = walk(findByProp(renderOf(settingsPanel), 'data-setting', 'playerBarButton')).find((n) => n.props && n.props.role === 'switch')
+  switch2.props.onClick()
+  eq(apiOut.state.settings.playerBarButton, true, '再打开')
+  await tick()
+  eq(first.records.mounts.length, mountsBefore + 1, '重新挂载')
+  eq(first.records.barHost.querySelector('.sd-bar-btn') !== null, true, '按钮又回来了')
+  // 恢复默认值，下一段要验「确认框默认开启」
+  apiOut.state.settings.confirmBeforeDownload = true
+
+  /* -------------------------------------------------- 24. 确认框开关生效 */
+  section('24. 设置里的「下载前弹确认框」真的生效')
+  const confirmSwitch = walk(findByProp(renderOf(settingsPanel), 'data-setting', 'confirmBeforeDownload')).find(
+    (n) => n.props && n.props.role === 'switch'
+  )
+  ok(!!confirmSwitch, '设置里有确认框开关')
+  eq(confirmSwitch.props['aria-checked'], 'true', '默认开启')
+  confirmSwitch.props.onClick()
+  eq(apiOut.state.settings.confirmBeforeDownload, false, '关掉确认框')
+  tree = renderOf(page)
+  const beforeNoDlg = apiOut.state.tasks.length
+  await findByProp(tree, 'data-action', 'download-current').props.onClick()
+  eq(apiOut.dlg.open, false, '关掉后不再弹框')
+  eq(apiOut.state.tasks.length, beforeNoDlg + 1, '直接开始下载')
+  await waitFor(() => apiOut.state.tasks.every((t) => t.status !== 'downloading' && t.status !== 'resolving' && t.status !== 'saving'), '任务收敛')
+
+  /* -------------------------------------------------- 25. dispose 回收 */
+  section('25. dispose 回收在跑的任务与全局监听')
+  net.mode = 'range'
   net.file = makeBytes(3 * 1024 * 1024, 37)
   const preDispose = await apiOut.startDownloads([FLAC_TRACK], 'auto')
+  const handlersBefore = doc.keyHandlers.length
   first.records.disposers[0]()
+  ok(doc.keyHandlers.length < handlersBefore, 'dispose 摘掉了全局 keydown 监听')
   await waitFor(() => preDispose[0].status === 'canceled' || preDispose[0].status === 'done', 'dispose 后任务收敛')
   eq(preDispose[0].status, 'canceled', 'dispose 把在跑的任务标记为取消')
 
   await mod.deactivate()
   eq(typeof mod.deactivate, 'function', 'deactivate 可调用')
 
-  /* ------------------------------------------------------------ 21. 长延时压缩 */
-  ok(longDelays.length > 0, '确实出现过长延时（已压成 0）', { longDelays })
-
   /* ------------------------------------------------------------- 收尾 */
+  clearAllIntervals()
   say('\n===== 歌曲下载 smoke =====')
   say('通过：' + pass)
   if (failures.length) {
