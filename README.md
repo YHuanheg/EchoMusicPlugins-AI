@@ -14,11 +14,14 @@
 ├─ kugou-daily-vip/                   # 插件：概念版每日领VIP
 ├─ kugou-recommend/                   # 插件：推荐电台（多源音乐推荐）
 ├─ tag-filter/                        # 插件：插件标签筛选（给插件面板加标签筛选条）
+├─ song-downloader/                   # 插件：歌曲下载（当前播放 / 播放队列 → 本地）
 ├─ tests/                             # 无头集成测试 + 真实网络冒烟 + 变异测试
 │  ├─ kugou-recommend.smoke.mjs      # 真实 Vue 3 ESM + mock ctx，275 条断言
 │  ├─ kugou-recommend.live.mjs       # 打真实网关，验证上游形态确实能解析
 │  ├─ tag-filter.smoke.mjs           # 仿真宿主 DOM，203 条断言
 │  ├─ tag-filter.mutate.mjs          # 标签筛选的变异测试（16 个变异）
+│  ├─ song-downloader.smoke.mjs      # mock ctx + 真实 Range 语义的假 CDN，173 条断言
+│  ├─ song-downloader.mutate.mjs     # 歌曲下载的变异测试（12 个变异）
 │  └─ mutate-check.mjs               # 把关键行为改回 bug，确认测试真的会失败
 └─ docs/
    ├─ EchoMusic-插件系统与加速链路调研.md   # 调研 + 实测数据 + 设计决策
@@ -35,6 +38,7 @@
 | **概念版每日领VIP** | `kugou-daily-vip` | 每天自动领取酷狗概念版畅听 VIP（听歌 + 广告 + 签到） | [README](kugou-daily-vip/README.md) |
 | **推荐电台** | `kugou-recommend` | 八源音乐推荐：频道漫游 / 每日推荐 / 猜你喜欢 / 曲风 / AI / 新歌 / 历史 / 排行 | [README](kugou-recommend/README.md) |
 | **插件标签筛选** | `tag-filter` | 给「设置 → 插件」面板加一条标签筛选条：自动聚合面板内所有插件的标签，多选实时过滤、清除筛选、空状态提示 | [README](tag-filter/README.md) |
+| **歌曲下载** | `song-downloader` | 把当前播放 / 播放队列的歌下载到本地：自动挑音质、分片下载带真实进度与速度、批量队列与历史 | [README](song-downloader/README.md) |
 
 ## 安装
 
@@ -237,6 +241,44 @@ Xget 更快、支持 20+ 平台，但属于**路径重写**形态，直接填入
 tests/tag-filter.smoke.mjs    无头集成测试（真实 Vue 3 ESM + 仿真宿主 DOM + mock ctx）203/203 通过
 tests/tag-filter.mutate.mjs   变异测试（把关键行为改回 bug，确认断言有效）            16/16 被抓到
 ```
+
+---
+
+# 歌曲下载（`song-downloader`）
+
+> 当前版本 **1.0.0** · 需要 EchoMusic **≥ 2.3.2-beta.2**
+
+把「当前播放」或「播放队列」里的歌下载到本地：自动挑可用音质、分片下载带**真实进度与速度**、
+批量任务队列、失败重试、下载历史与直链复制。侧边栏「插件 → 下载」即入口。
+
+```
+┌ 当前播放                                  [下载] [另存为…] [复制直链] ┐
+│  花落叹 / 涂一乐 · 某专辑   可用音质：128K 320K FLAC                  │
+├ 播放队列（12）          [全选] [清空选择] [下载选中（3）]             ┤
+│  ☑ 花落叹  涂一乐  128K 320K FLAC   [下载]                            │
+│  ☐ 云盘歌曲 · ⚠ 云盘歌曲暂不支持下载  [下载]（禁用）                   │
+├ 下载任务（1）                            [全部停止] [清空已完成]      ┤
+│  花落叹 · FLAC   [下载中 62%] [停止]                                  │
+│  ████████████████████░░░░░░░░  12.4 MB / 32.1 MB · 1.8 MB/s           │
+│  已用 18 秒 · 剩余约 11 秒                                            │
+└───────────────────────────────────────────────────────────────────────┘
+```
+
+三个关键工程决策（详见 [`song-downloader/README.md`](song-downloader/README.md)）：
+
+| 决策 | 为什么 |
+| --- | --- |
+| 音质与 hash 完全对齐宿主 `PlayerResolver`，**128 档强制用轨道主 hash** | 每种音质对应不同 hash；而 `qualityMatch(entry,'128')` 恒为 true，直接 `find` 会命中数组第一条（可能是 flac 那条），拿到错误的音频 |
+| 默认 **Range 分片下载**（1 MiB/片）自建进度与速度 | 宿主 `ctx.net.request` 没有字节回调；分片还能顺带支持「停止」与真实速率。**`maxResponseBytes` 必须传 0**，否则默认 32 MiB 会截断大 FLAC |
+| 落盘走 `Blob + <a download>`（系统下载目录），可选 `showSaveFilePicker` | 宿主把「写任意路径」堵死了：`ctx.fs.writeFile` 被限制在插件目录内且单次 ≤ 8 MB，`ctx.process.launch` 只允许插件目录内的 exe，主进程也没有 `will-download`。不绕过这条安全边界 |
+
+```
+tests/song-downloader.smoke.mjs    无头集成测试（真实 Vue 3 ESM + mock ctx + 真实 Range 语义的假 CDN）173/173 通过
+tests/song-downloader.mutate.mjs   变异测试（把关键行为改回 bug，确认断言有效）                      12/12 被抓到
+```
+
+测试里假 CDN **真实实现 Range 语义**，所以能断言「拼装后的字节与源文件逐字节一致」；
+另用 `watchEffect` 盯渲染结果，确认队列变化与任务状态变化真的驱动了界面。
 
 ---
 

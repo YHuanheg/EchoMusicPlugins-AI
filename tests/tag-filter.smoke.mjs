@@ -343,6 +343,61 @@ function makeCard({ id, name, tags = [], featureTags = [] }) {
   return card
 }
 
+/**
+ * 在线插件卡片（MarketplacePluginCard）：根节点多一个 marketplace-card，
+ * 状态靠 .plugin-status-badge 的文案（已安装 / 未安装 / 可更新 / 版本要求）。
+ */
+function makeMarketplaceCard({ id, name, tags = [], status = '未安装', installLabel }) {
+  const card = el('article', 'plugin-card marketplace-card')
+  card.setAttribute('data-marketplace-plugin-key', `src:${id}`)
+  const main = el('div', 'plugin-card-main')
+  const summary = el('div', 'plugin-card-summary')
+  const header = el('div', 'plugin-card-header')
+  header.appendChild(el('h3', 'plugin-card-name', name))
+  header.appendChild(el('span', 'plugin-status-badge', status))
+  summary.appendChild(header)
+  main.appendChild(summary)
+  card.appendChild(main)
+
+  if (tags.length) {
+    const box = el('div', 'marketplace-tags')
+    for (const tag of tags) box.appendChild(el('span', null, tag))
+    card.appendChild(box)
+  }
+  if (id) {
+    const details = el('div', 'plugin-card-details')
+    details.appendChild(el('div', 'plugin-card-id', `ID: ${id}`))
+    card.appendChild(details)
+  }
+
+  const actions = el('div', 'plugin-card-actions')
+  const button = el('button', 'marketplace-install-btn')
+  button.textContent =
+    installLabel === undefined ? (status === '未安装' ? '安装' : status === '可更新' ? '更新' : '已安装') : installLabel
+  actions.appendChild(button)
+  card.appendChild(actions)
+  return card
+}
+
+/** 把已安装卡片标成「未在跑」（宿主：!enabled || invalid || !compatible） */
+function markDisabled(card) {
+  card.className = `${card.className} is-disabled`
+  return card
+}
+
+/** 造一个独立的插件管理页（可指定卡片集合），返回 { content, grid } */
+function buildPageWith(cards) {
+  const content = el('div', 'plugin-content px-6 pb-6')
+  const heading = el('div', 'plugin-content-heading')
+  heading.appendChild(el('span', null, `共 ${cards.length} 个`))
+  content.appendChild(heading)
+  const grid = el('div', 'plugin-card-grid')
+  for (const card of cards) grid.appendChild(card)
+  content.appendChild(grid)
+  doc.body.appendChild(content)
+  return { content, grid }
+}
+
 /** 夹具：7 张卡片 / 12 个目录标签 + 1 个「未标注」（标签取自本机真实安装的插件） */
 const FIXTURE = [
   { id: 'kugou-recommend', name: '推荐电台', tags: ['kugou', 'recommend', 'discover', 'radio'], featureTags: ['网络'] },
@@ -523,10 +578,14 @@ const toastText = (record) => record.toasts.map((item) => item[1]).join(' | ')
 
 const PROBE_EXPORT = `
 export {
-  DEFAULT_SETTINGS, MATCH_MODES, UNTAGGED_KEY, DOM,
-  normalizeText, normalizeTag, tagKeyOf, stripIdPrefix, isBusyGrid, textOf,
-  matchesSelection, pickEntityKey, readCardTags, mergeRecords, entitiesFromSnapshot,
-  matchStats, buildChips, sameChips
+  DEFAULT_SETTINGS, MATCH_MODES, UNTAGGED_KEY, DOM, FACET_DEFS, GROUP_TITLES,
+  normalizeText, normalizeTag, tagKeyOf, stripIdPrefix, isBusyGrid, textOf, hasClass,
+  matchesSelection, pickEntityKey, readCardTags, readCardFacets, readInstallState,
+  mergeRecords, entitiesFromSnapshot,
+  emptySelection, normalizeSelection, selectionCount, pickFacet, matchesFacetValue, matchesEntity,
+  isFacetValue, normalizeGroups, groupSelectionState, toggleGroupTags,
+  matchStats, matchStatsFor, buildChips, buildFacetChips, buildGroupChips, buildGroups,
+  sameChips, sameGroups
 }
 `
 
@@ -690,6 +749,198 @@ const sampleEntities = [
 }
 
 /* ========================================================================== *
+ * 1b. 纯函数：状态维度、分组、自定义组
+ * ========================================================================== */
+
+section('纯函数·维度与分组')
+
+{
+  const empty = mod.emptySelection()
+  eq(empty.tags.length + empty.install.length + empty.enabled.length, 0, '空选择三个维度都是空数组')
+  eq(mod.selectionCount(empty), 0, '空选择的条件数为 0')
+
+  const migrated = mod.normalizeSelection(['kugou', 'kugou', ' vip '])
+  eq(migrated.tags.length, 2, '旧格式（纯标签数组）能迁移，并去重去空白')
+  eq(mod.selectionCount(migrated), 2, '迁移后的条件数正确')
+
+  const cleaned = mod.normalizeSelection({ tags: ['a'], install: ['installed', 'bogus'], enabled: ['on', 'nope'] })
+  eq(cleaned.install.join(','), 'installed', '非法安装状态被丢弃')
+  eq(cleaned.enabled.join(','), 'on', '非法启用状态被丢弃')
+  eq(mod.selectionCount(cleaned), 3, '三个维度合计 3 个条件')
+
+  ok(mod.isFacetValue('install', 'update'), 'isFacetValue 认得合法值')
+  ok(!mod.isFacetValue('install', 'archived'), 'isFacetValue 拒绝非法值')
+  ok(!mod.isFacetValue('nope', 'installed'), 'isFacetValue 拒绝未知维度')
+
+  const entity = {
+    key: 'id:a',
+    tagKeys: keySet('kugou'),
+    facets: { install: 'installed', enabled: 'off' },
+    tags: []
+  }
+  eq(mod.pickFacet(entity, 'install'), 'installed', 'pickFacet 取到安装状态')
+  eq(mod.pickFacet(entity, 'enabled'), 'off', 'pickFacet 取到启用状态')
+  eq(mod.pickFacet({ key: 'id:b' }, 'install'), null, '没有 facets 时返回 null')
+
+  ok(mod.matchesFacetValue('installed', []), '维度没选 → 放行')
+  ok(mod.matchesFacetValue('installed', ['installed', 'missing']), '维度内部是 OR')
+  ok(!mod.matchesFacetValue('missing', ['installed']), '值不在选中集合里 → 不匹配')
+  ok(!mod.matchesFacetValue(null, ['installed']), '卡片不暴露该维度且用户选了这个维度 → 不匹配（宁严勿松）')
+  ok(mod.matchesFacetValue(null, []), '卡片不暴露该维度但没筛它 → 放行')
+
+  ok(mod.matchesEntity(entity, mod.emptySelection(), 'any'), '无条件 → 命中')
+  ok(mod.matchesEntity(entity, { tags: [], install: ['installed'], enabled: [] }, 'any'), '维度命中')
+  ok(!mod.matchesEntity(entity, { tags: [], install: ['missing'], enabled: [] }, 'any'), '维度不命中')
+  ok(!mod.matchesEntity(entity, { tags: [], install: [], enabled: ['on'] }, 'any'), '启用状态也是 AND 的一环')
+  ok(
+    mod.matchesEntity(entity, { tags: ['kugou'], install: ['installed'], enabled: ['off'] }, 'any'),
+    '三个维度同时满足才命中'
+  )
+  ok(
+    !mod.matchesEntity(entity, { tags: ['nope'], install: ['installed'], enabled: ['off'] }, 'any'),
+    '标签维度不满足 → 整体不命中'
+  )
+
+  const facetEntities = [
+    { key: 'p1', tagKeys: keySet('a'), facets: { install: 'installed', enabled: 'on' }, tags: [] },
+    { key: 'p2', tagKeys: keySet('a'), facets: { install: 'missing', enabled: null }, tags: [] },
+    { key: 'p3', tagKeys: keySet('b'), facets: { install: 'installed', enabled: 'off' }, tags: [] }
+  ]
+  eq(mod.matchStatsFor(facetEntities, { tags: [], install: ['installed'], enabled: [] }, 'any').matched, 2, '统计：已安装 2 个')
+  eq(mod.matchStatsFor(facetEntities, { tags: [], install: [], enabled: ['off'] }, 'any').matched, 1, '统计：未启用 1 个')
+  eq(
+    mod.matchStatsFor(facetEntities, { tags: ['a'], install: ['installed'], enabled: [] }, 'any').matched,
+    1,
+    '统计：标签与维度之间是 AND'
+  )
+
+  const installChips = mod.buildFacetChips('install', facetEntities, mod.emptySelection(), 'any')
+  eq(installChips.length, 2, '安装状态只列出视图里真实出现过的值')
+  eq(installChips.map((c) => c.value).join(','), 'installed,missing', '值的顺序按定义顺序')
+  eq(installChips[0].count, 2, '已安装计数 2')
+  eq(installChips[0].alive, 2, '选中「已安装」后会匹配 2 个')
+  eq(installChips[1].key, 'install:missing', 'chip key 带维度前缀')
+  eq(mod.buildFacetChips('enabled', facetEntities, mod.emptySelection(), 'any').length, 2, '启用状态 2 个取值')
+
+  const withSelection = mod.buildFacetChips('install', facetEntities, { tags: [], install: ['missing'], enabled: [] }, 'any')
+  eq(
+    withSelection.find((c) => c.value === 'installed').alive,
+    3,
+    '未选中值：给出「加上它以后」的匹配数（维度内部 OR → 3 个都有安装状态）'
+  )
+  eq(withSelection.find((c) => c.value === 'missing').selected, true, '已选值标记 selected')
+  eq(withSelection.find((c) => c.value === 'missing').count, 1, '已选值的 count 仍是稳定值')
+
+  const missingOnly = [
+    { key: 'p1', tagKeys: keySet('a'), facets: { install: 'installed', enabled: null }, tags: [] }
+  ]
+  const noMissing = mod.buildFacetChips('install', missingOnly, { tags: [], install: ['missing'], enabled: [] }, 'any')
+  const missingChip = noMissing.find((c) => c.value === 'missing')
+  ok(!!missingChip, '已选但当前视图里不存在的维度值也要列出（否则取消不掉）')
+  eq(missingChip.count, 0, '不存在的维度值计数为 0')
+  eq(missingChip.dead, false, '已选中的 chip 不标记 dead')
+}
+
+{
+  /* 分组：只在维度真的有两种以上取值时才成组 */
+  const grouped = [
+    { key: 'p1', tagKeys: keySet('a'), facets: { install: 'installed', enabled: 'on' }, tags: [{ key: 'a', label: 'a' }] },
+    { key: 'p2', tagKeys: keySet('b'), facets: { install: 'missing', enabled: null }, tags: [{ key: 'b', label: 'b' }] }
+  ]
+  const groups = mod.buildGroups(grouped, mod.emptySelection(), 'any', null, {})
+  eq(groups.map((g) => g.id).join(','), 'install,tags', '安装状态有 2 个取值 → 成组；启用状态只有 1 个 → 不成组')
+  eq(groups[0].title, '安装状态', '分组标题来自定义')
+  eq(groups[1].title, '目录标签', '标签组标题')
+
+  const singleValue = [
+    { key: 'p1', tagKeys: keySet('a'), facets: { install: 'installed', enabled: 'on' }, tags: [{ key: 'a', label: 'a' }] },
+    { key: 'p2', tagKeys: keySet('b'), facets: { install: 'installed', enabled: 'off' }, tags: [{ key: 'b', label: 'b' }] }
+  ]
+  const onlyEnabled = mod.buildGroups(singleValue, mod.emptySelection(), 'any', null, {})
+  eq(onlyEnabled.map((g) => g.id).join(','), 'enabled,tags', '全部已安装 → 安装状态组消失；启用状态分两种 → 出现')
+  eq(onlyEnabled[0].chips.length, 2, '启用状态两个值都在')
+
+  const noFacets = mod.buildGroups(grouped, mod.emptySelection(), 'any', null, { showFacets: false })
+  eq(noFacets.map((g) => g.id).join(','), 'tags', 'showFacets 关掉后不再有状态组')
+
+  const withCapability = mod.buildGroups(
+    [
+      {
+        key: 'p1',
+        tagKeys: keySet('a', 'net'),
+        facets: { install: null, enabled: null },
+        tags: [
+          { key: 'a', label: 'a', capability: false },
+          { key: 'net', label: 'net', capability: true }
+        ]
+      }
+    ],
+    mod.emptySelection(),
+    'any',
+    null,
+    {}
+  )
+  eq(withCapability.map((g) => g.id).join(','), 'tags,capability', '能力标签单独成组，排在目录标签之后')
+
+  const emptyGroups = mod.buildGroups([], mod.emptySelection(), 'any', null, {})
+  eq(emptyGroups.length, 0, '没有实体 → 没有分组')
+}
+
+{
+  /* 自定义组 */
+  const groups = mod.normalizeGroups([
+    { id: 'g1', name: '歌词相关', tags: ['lyrics', 'floating-window', 'lyrics'] },
+    { id: 'g1', name: '重复 id', tags: ['x'] },
+    { id: 'g2', name: '', tags: ['y'] },
+    { id: 'g3', name: '空的', tags: [] },
+    { id: 'g4', name: '  ', tags: ['z'] },
+    null,
+    'garbage'
+  ])
+  eq(groups.length, 1, '非法/重复/空组被丢掉')
+  eq(groups[0].tags.length, 2, '组内标签去重')
+  eq(groups[0].name, '歌词相关', '组名保留')
+
+  const group = { id: 'g1', name: '歌词相关', tags: ['lyrics', 'floating-window'] }
+  eq(mod.groupSelectionState(group, []), 'none', '没选 → none')
+  eq(mod.groupSelectionState(group, ['lyrics']), 'some', '选了一部分 → some')
+  eq(mod.groupSelectionState(group, ['lyrics', 'floating-window']), 'all', '全选 → all')
+  eq(mod.groupSelectionState(group, ['lyrics', 'floating-window', 'other']), 'all', '组外标签不影响组状态')
+
+  eq(mod.toggleGroupTags(group, []).sort().join(','), 'floating-window,lyrics', '未全选 → 一次全选')
+  eq(mod.toggleGroupTags(group, ['lyrics']).sort().join(','), 'floating-window,lyrics', '部分选中 → 补全')
+  eq(mod.toggleGroupTags(group, ['lyrics', 'floating-window']).join(','), '', '全选状态下点击 → 全部取消')
+  eq(
+    mod.toggleGroupTags(group, ['lyrics', 'floating-window', 'other']).join(','),
+    'other',
+    '全选状态下点击 → 只取消组内标签，组外不受影响'
+  )
+
+  const members = [{ key: 'p1', tagKeys: keySet('lyrics', 'other'), facets: null, tags: [] }]
+  const groupChips = mod.buildGroupChips([group], members, { tags: ['lyrics'], install: [], enabled: [] })
+  eq(groupChips.length, 1, '每个组一个 chip')
+  eq(groupChips[0].kind, 'group', 'chip 类型是 group')
+  eq(groupChips[0].count, 2, '组 chip 的 count = 成员数')
+  eq(groupChips[0].present, 1, 'present = 本视图里真实存在的成员数')
+  eq(groupChips[0].selectedCount, 1, 'selectedCount = 已选成员数')
+  eq(groupChips[0].partial, true, '部分选中 → partial')
+  eq(groupChips[0].selected, false, '部分选中不算全选')
+}
+
+{
+  /* 分组等价判定：用来避免每秒重渲染 */
+  const chip = (key, extra = {}) => ({ key, label: key, count: 1, alive: 1, selected: false, dead: false, ...extra })
+  const groupOf = (chips) => [{ id: 'tags', kind: 'tag', title: '目录标签', chips }]
+  ok(mod.sameGroups(groupOf([chip('a')]), groupOf([chip('a')])), 'sameGroups：内容一致等价')
+  ok(!mod.sameGroups(groupOf([chip('a')]), groupOf([chip('b')])), 'sameGroups：chip 不同不等价')
+  ok(!mod.sameGroups(groupOf([chip('a')]), []), 'sameGroups：分组数量不同不等价')
+  ok(
+    !mod.sameGroups(groupOf([chip('a', { partial: true })]), groupOf([chip('a')])),
+    'sameGroups：partial 变化要算不等价'
+  )
+}
+
+/* ========================================================================== *
  * 2. 激活与注册
  * ========================================================================== */
 
@@ -793,8 +1044,8 @@ tree = bar()
 eq(visibleCards().length, 0, '「全部」模式：lyrics AND local 无交集 → 0 个')
 ok(byProp(tree, 'data-mode', 'all').props.class.includes('is-on'), '「全部」按钮进入选中态')
 ok(!!byProp(tree, 'data-role', 'empty'), '无匹配时渲染出空状态')
-includes(textOfNode(byProp(tree, 'data-role', 'empty')), '没有符合标签的插件', '空状态标题友好')
-includes(textOfNode(byProp(tree, 'data-role', 'empty')), 'lyrics', '空状态列出已选标签，便于自查')
+includes(textOfNode(byProp(tree, 'data-role', 'empty')), '没有符合条件的插件', '空状态标题友好')
+includes(textOfNode(byProp(tree, 'data-role', 'empty')), 'lyrics', '空状态列出已选条件，便于自查')
 ok(cardsOf().every((card) => card.style.display === 'none'), '空状态下列表确实是空的')
 
 byProp(tree, 'data-action', 'clear').props.onClick()
@@ -807,7 +1058,7 @@ tree = bar()
 eq(visibleCards().length, N_KUGOU, '全部模式下单选 kugou = 1 个')
 ok(chipByTag(tree, 'lyrics').props.class.includes('is-dead'), 'kugou 已选时 lyrics 被标记为 is-dead')
 eq(chipByTag(tree, 'lyrics').props['data-selected'], '0', 'is-dead 的 chip 依旧可点（不是 disabled）')
-includes(chipByTag(tree, 'lyrics').props.title, '没有插件带这个标签', 'is-dead 的提示文案解释了原因')
+includes(chipByTag(tree, 'lyrics').props.title, '没有插件符合', 'is-dead 的提示文案解释了原因')
 
 byProp(tree, 'data-action', 'clear').props.onClick()
 tree = bar()
@@ -989,15 +1240,15 @@ let settingsTree = settingsPanel()
 const switchNodes = () => findAll(settingsTree, (n) => n.props && n.props.role === 'switch')
 const clickSwitch = (index) => switchNodes()[index].props.onClick({ preventDefault() {} })
 
-eq(switchNodes().length, 6, '设置面板有 6 个开关')
+eq(switchNodes().length, 7, '设置面板有 7 个开关')
 ok(
   switchNodes()
-    .slice(0, 4)
+    .slice(0, 5)
     .every((n) => n.props['aria-checked'] === 'true'),
-  '默认前 4 个开关都是开启的（面板筛选条 / 侧边栏入口 / 记住筛选 / 显示计数）'
+  '默认前 5 个开关都是开启的（筛选条 / 侧边栏入口 / 记住筛选 / 显示计数 / 状态维度）'
 )
-eq(switchNodes()[4].props['aria-checked'], 'false', '「同时纳入能力标签」默认关闭（避免两套标签体系混淆）')
-eq(switchNodes()[5].props['aria-checked'], 'false', '「调试日志」默认关闭')
+eq(switchNodes()[5].props['aria-checked'], 'false', '「同时纳入能力标签」默认关闭（避免两套标签体系混淆）')
+eq(switchNodes()[6].props['aria-checked'], 'false', '「调试日志」默认关闭')
 
 /* 关闭「显示计数」 */
 clickSwitch(3)
@@ -1010,7 +1261,7 @@ ok(
 eq(switchNodes()[3].props['aria-checked'], 'false', '开关状态同步更新')
 
 /* 打开「能力标签」 */
-clickSwitch(4)
+clickSwitch(5)
 flushTimeouts()
 tree = bar()
 ok(!!chipByTag(tree, '网络'), '打开「能力标签」后能力标签进入 chip 列表')
@@ -1035,7 +1286,7 @@ eq(chipByTag(tree, 'lyrics').props['data-capability'], '0', '目录标签的 cap
   settingsTree = settingsPanel()
   clickSwitch(0)
   clickSwitch(3)
-  clickSwitch(4)
+  clickSwitch(5)
   flushTimeouts()
   eq(doc.querySelectorAll('.etf-host').length, 1, '重新打开后筛选条回来了')
   tree = bar()
@@ -1084,11 +1335,10 @@ eq(visibleCards().length, N_LYRICS, '命令执行前先选中一个标签')
 await ctx.commands.execute('clear-tag-filter')
 tree = bar()
 eq(visibleCards().length, CARD_COUNT, 'clear-tag-filter 清除筛选')
-includes(toastText(record), '已清除标签筛选', '清除后给出提示')
+includes(toastText(record), '已清除筛选条件', '清除后给出提示')
 
 await ctx.commands.execute('clear-tag-filter')
-includes(toastText(record), '当前没有标签筛选条件', '无筛选时给出中性提示')
-
+includes(toastText(record), '当前没有筛选条件', '无筛选时给出中性提示')
 await ctx.commands.execute('toggle-tag-filter-bar')
 flushTimeouts()
 eq(doc.querySelectorAll('.etf-host').length, 0, 'toggle 命令关闭了筛选条')
@@ -1158,7 +1408,8 @@ includes(textOfNode(byProp(pageTree, 'data-role', 'catalog-meta')), '实时', '�
     eq(parsed.dom.cards, CARD_COUNT, '诊断里记录了面板卡片数')
     eq(parsed.dom.hosts, 1, '诊断里记录了已注入的筛选条数量')
     eq(parsed.cards.length, CARD_COUNT, '诊断里逐张列出了卡片与其标签')
-    ok(Array.isArray(parsed.selection), '诊断里带当前选择')
+    ok(parsed.selection && Array.isArray(parsed.selection.tags), '诊断里带当前选择（三维度结构）')
+    ok(Array.isArray(parsed.groups), '诊断里带自定义组列表')
   } else {
     ok(true, '当前环境不支持剪贴板，跳过诊断内容断言')
   }
@@ -1309,6 +1560,461 @@ section('无标签降级')
   ok(!!byProp(tree4, 'data-role', 'hint'), '一个标签都没有时降级提示一直保留（这时的解释始终有效）')
 
   disposeAll(record4)
+}
+
+/* ========================================================================== *
+ * 18. 状态维度：安装状态（在线插件视图）
+ * ========================================================================== */
+
+section('状态维度·安装状态')
+
+const groupsOf = (tree) => findAll(tree, (n) => n.props && n.props['data-role'] === 'group')
+const groupIds = (tree) => groupsOf(tree).map((n) => n.props['data-group'])
+const facetChipsOf = (tree) => findAll(tree, (n) => n.props && n.props['data-facet'] !== undefined)
+const facetChip = (tree, facetId, value) =>
+  facetChipsOf(tree).find((n) => n.props['data-facet'] === facetId && n.props['data-value'] === value)
+const groupHeads = (tree) => findAll(tree, (n) => n.props && n.props['data-action'] === 'toggle-group')
+const groupHeadOf = (tree, id) => groupHeads(tree).find((n) => n.props['data-group'] === id)
+const customGroupChips = (tree) =>
+  findAll(tree, (n) => n.props && typeof n.props['data-key'] === 'string' && n.props['data-key'].startsWith('group:'))
+const customGroupChip = (tree, id) => customGroupChips(tree).find((n) => n.props['data-group'] === id)
+const expandButton = (tree) => byProp(tree, 'data-action', 'toggle-expand')
+const groupsBlock = (tree) => byProp(tree, 'data-role', 'groups')
+const summaryRow = (tree) => byProp(tree, 'data-role', 'summary')
+
+const MARKETPLACE_FIXTURE = [
+  { id: 'kugou-recommend', name: '推荐电台', tags: ['kugou', 'radio'], status: '已安装' },
+  { id: 'taskbar-lyric', name: '任务栏歌词', tags: ['lyrics'], status: '可更新' },
+  { id: 'player-frontend', name: '播放器前端', tags: ['player', 'lyrics'], status: '未安装' },
+  { id: 'mouse-gesture', name: '鼠标手势', tags: ['gesture'], status: '未安装' }
+]
+
+{
+  resetDom()
+  const page = buildPageWith(MARKETPLACE_FIXTURE.map((item) => makeMarketplaceCard(item)))
+  const { ctx: mkCtx, record: mkRecord } = makeCtx()
+  await mod.activate(mkCtx)
+  const mkBar = renderComponent(mkRecord.mounts[0].component)
+  let mkTree = mkBar()
+  const mkCards = () => Array.from(page.grid.querySelectorAll('.plugin-card'))
+  const mkVisible = () => mkCards().filter((card) => card.style.display !== 'none')
+
+  eq(groupIds(mkTree).join(','), 'install,tags', '在线视图：安装状态成组；启用状态不暴露所以不出现')
+  eq(groupHeadOf(mkTree, 'install').props.class.includes('is-collapsed'), false, '分组默认展开')
+  eq(facetChipsOf(mkTree).length, 3, '安装状态列出 已安装 / 未安装 / 可更新 三个值')
+  eq(facetChip(mkTree, 'install', 'installed').props['data-count'], '1', '已安装计数 1')
+  eq(facetChip(mkTree, 'install', 'missing').props['data-count'], '2', '未安装计数 2')
+  eq(facetChip(mkTree, 'install', 'update').props['data-count'], '1', '可更新计数 1')
+  eq(facetChip(mkTree, 'install', 'missing').props['data-selected'], '0', '初始都未选中')
+  ok(
+    !chipsOf(mkTree).some((n) => String(n.props['data-tag']).indexOf('install:') === 0),
+    '状态 chip 不带 data-tag，不会混进标签统计'
+  )
+  eq(groupHeadOf(mkTree, 'install').props['aria-expanded'], 'true', '分组标题声明为展开')
+
+  facetChip(mkTree, 'install', 'missing').props.onClick()
+  mkTree = mkBar()
+  eq(mkVisible().length, 2, '选「未安装」→ 只剩两张未安装的卡片')
+  eq(facetChip(mkTree, 'install', 'missing').props['data-selected'], '1', '「未安装」进入选中态')
+  includes(textOfNode(byProp(mkTree, 'data-role', 'status')), '已选 1 个条件', '状态行的条件数含状态维度')
+  includes(textOfNode(groupHeadOf(mkTree, 'install')), '已选 1 / 3', '分组标题显示已选进度')
+
+  facetChip(mkTree, 'install', 'installed').props.onClick()
+  mkTree = mkBar()
+  eq(mkVisible().length, 3, '同一维度内多选是 OR（未安装 + 已安装 = 3）')
+
+  facetChip(mkTree, 'install', 'missing').props.onClick()
+  mkTree = mkBar()
+  eq(mkVisible().length, 1, '取消「未安装」后只剩已安装的那张')
+  eq(
+    facetChip(mkTree, 'install', 'missing').props.class.includes('is-dead'),
+    false,
+    '「未安装」已取消且仍有匹配，不算 dead'
+  )
+
+  /* 状态维度与标签维度之间是 AND */
+  byProp(mkTree, 'data-action', 'clear').props.onClick()
+  mkTree = mkBar()
+  clickChip(mkTree, 'lyrics')
+  mkTree = mkBar()
+  eq(mkVisible().length, 2, '只按 lyrics 筛 → 2 张（可更新的 + 未安装的各一张）')
+  facetChip(mkTree, 'install', 'missing').props.onClick()
+  mkTree = mkBar()
+  eq(mkVisible().length, 1, 'lyrics + 未安装 = 1（维度之间是 AND）')
+  eq(visibleName(mkVisible()[0]), '播放器前端', '交集命中的正是那张「未安装且带 lyrics」的卡片')
+  eq(
+    facetChip(mkTree, 'install', 'update').props.class.includes('is-on'),
+    false,
+    '带 lyrics 的那张「可更新」被 AND 排除掉了'
+  )
+
+  /* 标签与状态一起清除 */
+  byProp(mkTree, 'data-action', 'clear').props.onClick()
+  mkTree = mkBar()
+  eq(mkVisible().length, MARKETPLACE_FIXTURE.length, '清除筛选后全部可见')
+  eq(facetChipsOf(mkTree).every((n) => n.props['data-selected'] === '0'), true, '状态 chip 也一起被清掉')
+
+  disposeAll(mkRecord)
+}
+
+function visibleName(card) {
+  const name = card.querySelector('.plugin-card-name')
+  return name ? name.textContent : ''
+}
+
+/* ========================================================================== *
+ * 19. 状态维度：启用状态（已安装视图里有停用卡）
+ * ========================================================================== */
+
+section('状态维度·启用状态')
+
+{
+  resetDom()
+  const cards = [
+    makeCard({ id: 'a', name: '启用中的', tags: ['lyrics'] }),
+    markDisabled(makeCard({ id: 'b', name: '停用的', tags: ['lyrics'] })),
+    markDisabled(makeCard({ id: 'c', name: '也停用的', tags: ['radio'] }))
+  ]
+  const page = buildPageWith(cards)
+  const { ctx: onCtx, record: onRecord } = makeCtx()
+  await mod.activate(onCtx)
+  const onBar = renderComponent(onRecord.mounts[0].component)
+  let onTree = onBar()
+  const onVisible = () => Array.from(page.grid.querySelectorAll('.plugin-card')).filter((c) => c.style.display !== 'none')
+
+  eq(groupIds(onTree).join(','), 'enabled,tags', '已安装视图：启用状态成组（安装状态只有一种取值 → 不出现）')
+  eq(facetChipsOf(onTree).map((n) => n.props['data-value']).join(','), 'on,off', '启用状态两个值都在')
+  eq(facetChip(onTree, 'enabled', 'on').props['data-count'], '1', '已启用计数 1')
+  eq(facetChip(onTree, 'enabled', 'off').props['data-count'], '2', '未启用计数 2')
+  includes(
+    facetChip(onTree, 'enabled', 'off').props.title,
+    'is-disabled',
+    '「未启用」的提示里说明了判定依据'
+  )
+
+  facetChip(onTree, 'enabled', 'off').props.onClick()
+  onTree = onBar()
+  eq(onVisible().length, 2, '选「未启用」→ 只剩两张停用卡')
+  eq(visibleName(onVisible()[0]), '停用的', '命中的确实是带 is-disabled 的卡')
+
+  clickChip(onTree, 'lyrics')
+  onTree = onBar()
+  eq(onVisible().length, 1, '未启用 + lyrics = 1（AND）')
+  eq(visibleName(onVisible()[0]), '停用的', '交集正确')
+
+  byProp(onTree, 'data-action', 'clear').props.onClick()
+  onTree = onBar()
+  eq(onVisible().length, 3, '清除后恢复')
+
+  disposeAll(onRecord)
+}
+
+/* ========================================================================== *
+ * 20. 分组折叠 + 整体收起 / 展开
+ * ========================================================================== */
+
+section('分组折叠与整体收起')
+
+{
+  resetDom()
+  const cards = [
+    makeCard({ id: 'a', name: 'A', tags: ['lyrics', 'player'] }),
+    markDisabled(makeCard({ id: 'b', name: 'B', tags: ['lyrics'] }))
+  ]
+  const page = buildPageWith(cards)
+  const { ctx: fc, record: fr } = makeCtx()
+  await mod.activate(fc)
+  const fBar = renderComponent(fr.mounts[0].component)
+  let fTree = fBar()
+  const fVisible = () => Array.from(page.grid.querySelectorAll('.plugin-card')).filter((c) => c.style.display !== 'none')
+
+  eq(groupIds(fTree).join(','), 'enabled,tags', '两组：启用状态 + 目录标签')
+  eq(!!groupsBlock(fTree), true, '默认展开：分组区在')
+  eq(expandButton(fTree).props['data-expanded'], '1', '展开按钮声明为已展开')
+  eq(summaryRow(fTree), undefined, '展开时不显示「已选条件」行（标签已经可见，不重复占地方）')
+  includes(textOfNode(expandButton(fTree)), '收起', '展开状态下按钮文案是「收起」')
+
+  /* 单个分组折叠 */
+  groupHeadOf(fTree, 'tags').props.onClick()
+  fTree = fBar()
+  eq(groupHeadOf(fTree, 'tags').props.class.includes('is-collapsed'), true, '标签组折叠后带 is-collapsed')
+  eq(chipsOf(fTree).length, 0, '折叠的组不再渲染 chip')
+  eq(facetChipsOf(fTree).length, 2, '其它组不受影响')
+  eq(!!groupsBlock(fTree), true, '单个组折叠不会收起整个分组区')
+
+  groupHeadOf(fTree, 'tags').props.onClick()
+  fTree = fBar()
+  eq(chipsOf(fTree).length, 2, '再点一次展开，chip 回来')
+  eq(groupHeads(fTree).length, 2, '两个组标题都在')
+
+  /* 整体收起 */
+  clickChip(fTree, 'lyrics')
+  fTree = fBar()
+  eq(fVisible().length, 2, '先筛一下，让「已选条件」行有内容')
+  expandButton(fTree).props.onClick()
+  fTree = fBar()
+  eq(expandButton(fTree).props['data-expanded'], '0', '整体收起后按钮状态翻转')
+  eq(groupsBlock(fTree), undefined, '整体收起后分组区消失')
+  includes(textOfNode(expandButton(fTree)), '展开筛选', '收起状态下按钮提示展开')
+  const summary = summaryRow(fTree)
+  ok(!!summary, '收起时显示「已选条件」行（否则用户看不到自己在筛什么）')
+  includes(textOfNode(summary), 'lyrics', '「已选条件」行列出已选标签')
+  eq(
+    findAll(summary, (n) => n.props && n.props['data-summary'] === '1').length,
+    1,
+    '已选条件行里每个条件一个可点 chip'
+  )
+  eq(fVisible().length, 2, '收起只是界面收起，过滤依旧生效')
+
+  /* 点「已选条件」行里的 chip = 取消该条件 */
+  findAll(summaryRow(fTree), (n) => n.props && n.props['data-summary'] === '1')[0].props.onClick()
+  fTree = fBar()
+  eq(fVisible().length, 2, '取消唯一条件后全部可见')
+  includes(textOfNode(summaryRow(fTree)), '未选择筛选条件', '没有条件时给出提示文案')
+
+  expandButton(fTree).props.onClick()
+  fTree = fBar()
+  ok(!!groupsBlock(fTree), '再点一次又展开')
+
+  /* 命令也能切换展开状态 */
+  await fc.commands.execute('toggle-tag-filter-expand')
+  fTree = fBar()
+  eq(expandButton(fTree).props['data-expanded'], '0', 'toggle-tag-filter-expand 命令能收起')
+  await fc.commands.execute('toggle-tag-filter-expand')
+  fTree = fBar()
+  eq(expandButton(fTree).props['data-expanded'], '1', '再执行一次又展开')
+
+  /* 折叠状态会被持久化 */
+  groupHeadOf(fTree, 'tags').props.onClick()
+  expandButton(fTree).props.onClick()
+  flushTimeouts()
+  const savedUi = fr.store.get('tag-filter-store').ui
+  eq(savedUi.expanded, false, '整体收起状态已持久化')
+  eq(savedUi.groupCollapsed.tags, true, '分组折叠状态已持久化')
+
+  disposeAll(fr)
+  resetDom()
+
+  /* 重启后恢复折叠状态 */
+  const { ctx: rc, record: rr } = makeCtx(fr.store)
+  buildPageWith(MARKETPLACE_FIXTURE.map((item) => makeMarketplaceCard(item)))
+  await mod.activate(rc)
+  const rTree = renderComponent(rr.mounts[0].component)()
+  eq(expandButton(rTree).props['data-expanded'], '0', '重启后保持收起状态')
+  eq(!!groupsBlock(rTree), false, '收起状态下分组区确实没渲染')
+  disposeAll(rr)
+}
+
+/* ========================================================================== *
+ * 21. 自定义标签组
+ * ========================================================================== */
+
+section('自定义标签组')
+
+{
+  resetDom()
+  const page = buildPageWith([
+    makeCard({ id: 'a', name: 'A', tags: ['lyrics', 'floating-window'] }),
+    makeCard({ id: 'b', name: 'B', tags: ['radio'] })
+  ])
+  const { ctx: gc, record: gr } = makeCtx()
+  await mod.activate(gc)
+  const gBar = renderComponent(gr.mounts[0].component)
+  const gPage = renderComponent(gr.pages[0].component)
+  let gTree = gBar()
+  let pageTree = gPage()
+  const gVisible = () => Array.from(page.grid.querySelectorAll('.plugin-card')).filter((c) => c.style.display !== 'none')
+
+  eq(customGroupChips(gTree).length, 0, '没有自定义组时不出「快捷组」这一组')
+  eq(groupIds(gTree).join(','), 'tags', '只有标签组')
+  ok(!!byProp(pageTree, 'data-role', 'groups-empty'), '页面上提示还没有自定义组')
+
+  /* 没选标签就建组 → 提示而不是建出空组 */
+  byProp(pageTree, 'data-action', 'group-create').props.onClick()
+  includes(toastText(gr), '请先在筛选条里选中至少一个标签', '没选标签时建组给出提示')
+  eq(customGroupChips(gBar()).length, 0, '不会建出空组')
+
+  /* 选两个标签 → 用它们建组 */
+  clickChip(gTree, 'lyrics')
+  gTree = gBar()
+  clickChip(gTree, 'floating-window')
+  gTree = gBar()
+  eq(gVisible().length, 1, '两个标签生效（同一个插件同时带这两个标签）')
+
+  pageTree = gPage()
+  byProp(pageTree, 'data-role', 'new-group-name').props.onInput({ target: { value: '歌词相关' } })
+  pageTree = gPage()
+  byProp(pageTree, 'data-action', 'group-create').props.onClick()
+  flushTimeouts()
+
+  gTree = gBar()
+  pageTree = gPage()
+  eq(groupIds(gTree).join(','), 'shortcuts,tags', '建组后「快捷组」排在最前面')
+  eq(customGroupChips(gTree).length, 1, '快捷组里有一个 chip')
+  const created = customGroupChips(gTree)[0]
+  eq(created.props['data-key'].startsWith('group:'), true, '组 chip 的 key 带 group: 前缀')
+  eq(created.props['data-selected'], '1', '刚建组时成员正是当前选择 → 全选')
+  includes(textOfNode(created), '歌词相关', 'chip 上是组名')
+  eq(findAll(created, (n) => String(n.props.class || '').includes('etf-chip-count')).length, 1, '组 chip 显示已选/成员数')
+  includes(textOfNode(created), '2/2', '组 chip 显示 2/2')
+  includes(created.props.title, '含 2 个标签', '悬停提示说明成员数')
+
+  /* 清除筛选后：点组 = 一次选中全部成员 */
+  byProp(gTree, 'data-action', 'clear').props.onClick()
+  gTree = gBar()
+  eq(gVisible().length, 2, '清除后两张都可见')
+  eq(customGroupChips(gTree)[0].props['data-selected'], '0', '清除后组 chip 回到未选')
+  customGroupChips(gTree)[0].props.onClick()
+  gTree = gBar()
+  eq(gVisible().length, 1, '点一下组 = 一次选中组内全部标签')
+  eq(customGroupChips(gTree)[0].props['data-selected'], '1', '组 chip 变成全选态')
+
+  /* 组内手动少选一个 → 部分选中态（组外标签不影响组状态） */
+  clickChip(gTree, 'radio')
+  gTree = gBar()
+  eq(customGroupChips(gTree)[0].props['data-partial'], '0', '选了组外标签不影响组状态')
+  includes(textOfNode(customGroupChips(gTree)[0]), '2/2', '组 chip 仍是 2/2')
+  clickChip(gTree, 'floating-window')
+  gTree = gBar()
+  eq(customGroupChips(gTree)[0].props['data-partial'], '1', '少选一个成员 → partial')
+  eq(customGroupChips(gTree)[0].props['data-selected'], '0', 'partial 不算全选')
+  ok(customGroupChips(gTree)[0].props.class.includes('is-partial'), 'partial 有对应的样式类')
+  includes(textOfNode(customGroupChips(gTree)[0]), '1/2', '组 chip 显示 1/2')
+
+  /* 再点组 = 补全全选 */
+  customGroupChips(gTree)[0].props.onClick()
+  gTree = gBar()
+  eq(customGroupChips(gTree)[0].props['data-selected'], '1', 'partial 状态下点击 → 补全为全选')
+
+  /* 全选状态下点击 = 全部取消 */
+  customGroupChips(gTree)[0].props.onClick()
+  gTree = gBar()
+  eq(customGroupChips(gTree)[0].props['data-partial'], '0', '全选状态下点击 → 取消组内全部')
+  eq(customGroupChips(gTree)[0].props['data-selected'], '0', '取消后组 chip 回到未选')
+  eq(gVisible().length, 1, '组外那张带 radio 的卡片还在（取消组只影响组内标签）')
+
+  /* 页面上的组管理：成员单独移除 */
+  pageTree = gPage()
+  const row = byProp(pageTree, 'data-role', 'custom-group')
+  ok(!!row, '页面上有组管理行')
+  const memberChips = findAll(row, (n) => n.props && n.props['data-action'] === 'group-member')
+  eq(memberChips.length, 2, '组内成员各一个 chip')
+  ok(
+    findAll(memberChips[0], (n) => n.props && n.props.class === 'etf-chip-remove').length === 1,
+    '成员 chip 上有「×」移除按钮'
+  )
+  findAll(memberChips[0], (n) => n.props && n.props.class === 'etf-chip-remove')[0].props.onClick({
+    stopPropagation() {}
+  })
+  flushTimeouts()
+  eq(
+    findAll(
+      byProp(gPage(), 'data-role', 'custom-group'),
+      (n) => n.props && n.props['data-action'] === 'group-member'
+    ).length,
+    1,
+    '成员被移出组'
+  )
+
+  /* 用当前筛选覆盖成员 */
+  gTree = gBar()
+  byProp(gTree, 'data-action', 'clear').props.onClick()
+  gTree = gBar()
+  clickChip(gTree, 'radio')
+  gTree = gBar()
+  let pageNow = gPage()
+  byProp(pageNow, 'data-action', 'group-replace').props.onClick()
+  flushTimeouts()
+  const replaced = findAll(
+    byProp(gPage(), 'data-role', 'custom-group'),
+    (n) => n.props && n.props['data-action'] === 'group-member'
+  )
+  eq(replaced.length, 1, '「用当前筛选覆盖」把成员换成了当前选中的标签')
+  eq(replaced[0].props['data-member'], 'radio', '覆盖后的成员就是当前选中的那个标签')
+
+  /* 改名 */
+  const nameInput = byProp(gPage(), 'data-role', 'group-name')
+  nameInput.props.onInput({ target: { value: '电台相关' } })
+  byProp(gPage(), 'data-role', 'group-name').props.onChange({ target: { value: '电台相关' } })
+  flushTimeouts()
+  gTree = gBar()
+  includes(textOfNode(customGroupChips(gTree)[0]), '电台相关', '改名生效并同步到筛选条')
+
+  /* 删组 */
+  byProp(gPage(), 'data-action', 'group-remove').props.onClick()
+  flushTimeouts()
+  gTree = gBar()
+  eq(customGroupChips(gTree).length, 0, '删组后快捷组消失')
+  eq(groupIds(gTree).join(','), 'tags', '只剩标签组')
+  eq(gVisible().length, 2, '删组不影响当前筛选')
+
+  /* 把最后那个成员也移掉 → 空组自动删除 */
+  byProp(gBar(), 'data-action', 'clear').props.onClick()
+  gTree = gBar()
+  clickChip(gTree, 'floating-window')
+  gTree = gBar()
+  byProp(gPage(), 'data-role', 'new-group-name').props.onInput({ target: { value: '临时' } })
+  byProp(gPage(), 'data-action', 'group-create').props.onClick()
+  flushTimeouts()
+  eq(customGroupChips(gBar()).length, 1, '又建了一个组')
+  const single = findAll(
+    byProp(gPage(), 'data-role', 'custom-group'),
+    (n) => n.props && n.props['data-action'] === 'group-member'
+  )[0]
+  findAll(single, (n) => n.props.class === 'etf-chip-remove')[0].props.onClick({ stopPropagation() {} })
+  flushTimeouts()
+  eq(customGroupChips(gBar()).length, 0, '成员被删空后整组自动删除')
+  includes(toastText(gr), '已空了', '并给出提示')
+
+  disposeAll(gr)
+}
+
+/* ========================================================================== *
+ * 22. 新状态的持久化（状态维度选择 + 自定义组）
+ * ========================================================================== */
+
+section('新状态持久化')
+
+{
+  resetDom()
+  const page = buildPageWith([
+    makeMarketplaceCard({ id: 'kugou-recommend', name: '推荐电台', tags: ['kugou'], status: '已安装' }),
+    makeMarketplaceCard({ id: 'player-frontend', name: '播放器前端', tags: ['player'], status: '未安装' })
+  ])
+  const { ctx: pc, record: pr } = makeCtx()
+  await mod.activate(pc)
+  const pBar = renderComponent(pr.mounts[0].component)
+  let pTree = pBar()
+
+  facetChip(pTree, 'install', 'missing').props.onClick()
+  pTree = pBar()
+  clickChip(pTree, 'player')
+  pTree = pBar()
+  flushTimeouts()
+  const store = pr.store
+  const saved = store.get('tag-filter-store')
+  eq(saved.selection.install.join(','), 'missing', '状态维度选择已持久化')
+  eq(saved.selection.tags.join(','), 'player', '标签选择已持久化')
+  eq(saved.groups.length, 0, '没有自定义组时存的是空数组')
+
+  disposeAll(pr)
+  resetDom()
+
+  const page2 = buildPageWith([
+    makeMarketplaceCard({ id: 'kugou-recommend', name: '推荐电台', tags: ['kugou'], status: '已安装' }),
+    makeMarketplaceCard({ id: 'player-frontend', name: '播放器前端', tags: ['player'], status: '未安装' })
+  ])
+  const { ctx: qc, record: qr } = makeCtx(store)
+  await mod.activate(qc)
+  const qTree = renderComponent(qr.mounts[0].component)()
+  eq(facetChip(qTree, 'install', 'missing').props['data-selected'], '1', '重启后恢复状态维度选择')
+  eq(chipByTag(qTree, 'player').props['data-selected'], '1', '重启后恢复标签选择')
+  eq(
+    Array.from(page2.grid.querySelectorAll('.plugin-card')).filter((c) => c.style.display !== 'none').length,
+    1,
+    '重启后立即按「未安装 + player」过滤'
+  )
+  disposeAll(qr)
 }
 
 /* ========================================================================== *

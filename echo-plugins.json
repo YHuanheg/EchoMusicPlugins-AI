@@ -46,6 +46,19 @@
       ]
     },
     {
+      "id": "song-downloader",
+      "path": "song-downloader",
+      "repo": "https://github.com/YHuanheg/EchoMusicPlugins-AI",
+      "homepage": "https://github.com/YHuanheg/EchoMusicPlugins-AI/tree/main/song-downloader",
+      "tags": [
+        "download",
+        "kugou",
+        "audio",
+        "batch",
+        "tool"
+      ]
+    },
+    {
       "id": "tag-filter",
       "path": "tag-filter",
       "repo": "https://github.com/YHuanheg/EchoMusicPlugins-AI",
