@@ -26,9 +26,9 @@ const NODE = process.execPath
 const MUTANTS = [
   {
     name: '不跳过骨架屏网格（加载期间把占位标签当成真标签聚合出来）',
-    from: `      // 骨架屏网格：里面的 .plugin-card 是占位卡片，标签也是假的
+    from: `      // 骨架屏网格：里面的 .plugin-card 是占位卡片，标签与状态徽章也是假的
       if (isBusyGrid(grid)) continue`,
-    to: `      // 骨架屏网格：里面的 .plugin-card 是占位卡片，标签也是假的`
+    to: `      // 骨架屏网格：里面的 .plugin-card 是占位卡片，标签与状态徽章也是假的`
   },
   {
     name: '用 class 而不是行内 style 隐藏卡片（宿主重写 className 后筛选失效）',
@@ -140,6 +140,85 @@ const MUTANTS = [
       snapshotCacheKey = snapshot.items
       snapshotCacheValue = snapshot.items.length ? entitiesFromSnapshot(snapshot.items) : []
     }`
+  },
+  {
+    name: '启用状态用布尔值而不是维度 id（整组认不出值 → 状态筛选直接消失）',
+    from: `  return { install: 'installed', enabled: hasClass(card, DISABLED_CLASS) ? 'off' : 'on' }`,
+    to: `  return { install: 'installed', enabled: !hasClass(card, DISABLED_CLASS) }`
+  },
+  {
+    name: '不区分在线卡与已安装卡（在线插件视图的安装状态筛选整体失效）',
+    from: `  if (hasClass(card, MARKETPLACE_CARD_CLASS)) {
+    // 在线卡只暴露安装状态；启用状态它压根不渲染
+    return { install: readInstallState(card), enabled: null }
+  }`,
+    to: `  if (false) {
+    // 在线卡只暴露安装状态；启用状态它压根不渲染
+    return { install: readInstallState(card), enabled: null }
+  }`
+  },
+  {
+    name: '两个状态维度之间变成 OR（本该是 AND）',
+    from: `  if (!matchesFacetValue(pickFacet(entity, 'install'), picked.install || [])) return false
+  if (!matchesFacetValue(pickFacet(entity, 'enabled'), picked.enabled || [])) return false
+  return true`,
+    to: `  if (!matchesFacetValue(pickFacet(entity, 'install'), picked.install || [])) return false
+  return true`
+  },
+  {
+    name: '卡片不暴露某维度时视为匹配（「未安装」里混进状态不明的卡片）',
+    from: `  if (value === null || value === undefined) return false`,
+    to: `  if (value === null || value === undefined) return true`
+  },
+  {
+    name: '单一取值的维度也成组（「安装状态：已安装 7」这种筛不出东西的噪音组）',
+    from: `      if (chips.length < 2) continue`,
+    to: `      if (chips.length < 1) continue`
+  },
+  {
+    name: '分组折叠状态不持久化（重启后全部展开）',
+    from: `      ui: {
+        expanded: view.expanded,
+        groupCollapsed: { ...view.groupCollapsed }
+      },`,
+    to: `      ui: {
+        expanded: true,
+        groupCollapsed: { ...view.groupCollapsed }
+      },`
+  },
+  {
+    name: '点快捷组不是「全选/全取消」（组 chip 点了没反应）',
+    from: `  if (state === 'all') {
+    for (const key of group.tags) set.delete(key)
+  } else {
+    for (const key of group.tags) set.add(key)
+  }`,
+    to: `  if (state === 'none') {
+    for (const key of group.tags) set.delete(key)
+  } else {
+    for (const key of group.tags) set.add(key)
+  }`
+  },
+  {
+    name: '自定义组内标签不去重（同一个标签算两次，全选判定永远不成立）',
+    from: `      if (!key || tags.indexOf(key) >= 0) continue`,
+    to: `      if (!key) continue`
+  },
+  {
+    name: '组内成员被删空时不清理空组（留下一个点不动的空组）',
+    from: `    if (!group.tags.length) {
+      customGroups = customGroups.filter((item) => item.id !== groupId)
+      toast('info', \`「\${group.name}」已空了，顺手删掉了\`)
+    }`,
+    to: `    if (false) {
+      customGroups = customGroups.filter((item) => item.id !== groupId)
+      toast('info', \`「\${group.name}」已空了，顺手删掉了\`)
+    }`
+  },
+  {
+    name: '整体收起时不显示「已选条件」行（收起后看不到自己在筛什么）',
+    from: `            view.expanded ? null : renderSelectedSummary(),`,
+    to: `            null,`
   }
 ]
 

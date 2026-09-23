@@ -1737,7 +1737,11 @@ section('分组折叠与整体收起')
   /* 单个分组折叠 */
   groupHeadOf(fTree, 'tags').props.onClick()
   fTree = fBar()
-  eq(groupHeadOf(fTree, 'tags').props.class.includes('is-collapsed'), true, '标签组折叠后带 is-collapsed')
+  ok(
+    groupsOf(fTree).find((n) => n.props['data-group'] === 'tags').props.class.includes('is-collapsed'),
+    '标签组折叠后带 is-collapsed'
+  )
+  eq(groupHeadOf(fTree, 'tags').props['aria-expanded'], 'false', '折叠后分组标题声明为收起')
   eq(chipsOf(fTree).length, 0, '折叠的组不再渲染 chip')
   eq(facetChipsOf(fTree).length, 2, '其它组不受影响')
   eq(!!groupsBlock(fTree), true, '单个组折叠不会收起整个分组区')
@@ -1946,7 +1950,8 @@ section('自定义标签组')
   gTree = gBar()
   eq(customGroupChips(gTree).length, 0, '删组后快捷组消失')
   eq(groupIds(gTree).join(','), 'tags', '只剩标签组')
-  eq(gVisible().length, 2, '删组不影响当前筛选')
+  eq(gVisible().length, 1, '删组不碰当前筛选（radio 仍选中 → 仍只有那一张可见）')
+  eq(chipByTag(gTree, 'radio').props['data-selected'], '1', '组被删了，但组内标签的选中状态不受影响')
 
   /* 把最后那个成员也移掉 → 空组自动删除 */
   byProp(gBar(), 'data-action', 'clear').props.onClick()
