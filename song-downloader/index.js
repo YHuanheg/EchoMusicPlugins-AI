@@ -99,6 +99,7 @@ const DEFAULT_SETTINGS = {
   quality: 'auto', // auto | 128 | 320 | flac | high | viper_tape
   saveMode: 'direct', // direct（系统下载目录）| ask（单曲弹另存为对话框）
   confirmBeforeDownload: true, // 下载前弹确认框（可改音质/保存位置/文件名）
+  preferHostUrl: true, // 当前播放的歌直接复用宿主已解析的播放地址（最稳，避开风控）
   fileNameTemplate: '{artist} - {name}',
   chunked: true, // Range 分片下载（能显示真实进度与速度）
   chunkSizeMb: 1,
@@ -317,6 +318,68 @@ function guessExtByQuality(quality) {
   return 'mp3'
 }
 
+/**
+ * 宿主已经为「当前正在播的这首」解析好的地址。
+ *
+ * 为什么这是最稳的一条路：宿主自己的播放器同样走 `/song/url`（`Pf()` → `Q.get('/song/url')`），
+ * 但它那层 `Q` 自带风控兜底（`Wd()` 取 ssaCode → 唤起验证 → 用 `retriedAfterKugouVerification` 重试），
+ * 而**插件侧的 IPC 通道没有任何验证兜底**。既然宿主已经把这首的可播地址解出来的，
+ * 直接复用最省事：不发请求、不触发风控、拿到的还是播放器正在用的那条地址（一定可播）。
+ *
+ * 字段来自 pinia 的 player store（asar 核验）：
+ *   currentTrackId / currentAudioUrl / currentAudioCandidateUrls / currentResolvedAudioQuality
+ * 曲目对象上还可能有上一次解析留下的 `audioUrl`（非当前曲目 = 可能过期，只敢当兜底候选）。
+ */
+function hostPlaybackUrls(ctx, track, preferredQuality) {
+  const out = { urls: [], quality: '', current: false, allowed: false }
+  if (!ctx || !track) return out
+  let player = null
+  try {
+    player = ctx.stores && ctx.stores.player
+  } catch {
+    player = null
+  }
+  if (!player) return out
+
+  let curId = str(player.currentTrackId)
+  if (!curId) {
+    // 老宿主没有这个字段时，退回插件 API 的 currentTrack
+    try {
+      const ref = ctx.player && ctx.player.currentTrack
+      const cur = ref && 'value' in ref ? ref.value : ref
+      curId = str(cur && cur.id)
+    } catch {
+      curId = ''
+    }
+  }
+  const isCurrent = !!curId && curId === str(track.id)
+  const primary = str(player.currentAudioUrl)
+  if (isCurrent && primary) {
+    out.current = true
+    out.quality = str(player.currentResolvedAudioQuality).toLowerCase()
+    out.urls.push(primary)
+    const candidates = Array.isArray(player.currentAudioCandidateUrls) ? player.currentAudioCandidateUrls : []
+    for (const u of candidates) {
+      const s = str(u)
+      if (s) out.urls.push(s)
+    }
+    out.allowed = hostQualityCovers(out.quality, preferredQuality)
+  }
+  const stale = str(track.audioUrl)
+  if (stale) out.urls.push(stale)
+  out.urls = [...new Set(out.urls)].filter(Boolean)
+  return out
+}
+
+/** 宿主的播放音质够不够（请求 auto 表示「跟着宿主走」） */
+function hostQualityCovers(hostQuality, preferred) {
+  if (!preferred || preferred === 'auto') return true
+  const hi = QUALITY_LADDER.indexOf(str(hostQuality).toLowerCase())
+  const wi = QUALITY_LADDER.indexOf(str(preferred))
+  if (hi < 0 || wi < 0) return false
+  return hi >= wi
+}
+
 function mimeForExt(ext) {
   return EXT_MIME[str(ext).toLowerCase()] || 'application/octet-stream'
 }
@@ -346,6 +409,9 @@ function normalizeTrack(raw) {
     albumAudioId: str(firstOf(raw, ['albumAudioId', 'album_audio_id', 'mixSongId'])),
     duration: num(firstOf(raw, ['duration', 'timelength']), 0),
     coverUrl: str(firstOf(raw, ['coverUrl', 'cover', 'img'])),
+    // 宿主解析过一次以后会把地址写回曲目（可能已过期，所以只当兜底候选）；这里必须保留，
+    // 否则「上游风控失败 → 用残留地址救一把」这条兜底永远走不到（真被测试抓到过）。
+    audioUrl: str(raw.audioUrl),
     source: str(raw.source).toLowerCase(),
     relateGoods: goods
   }
@@ -358,6 +424,7 @@ function trackSnapshot(track) {
     albumId: track.albumId,
     albumAudioId: track.albumAudioId,
     duration: track.duration,
+    audioUrl: track.audioUrl,
     relateGoods: track.relateGoods
   }
 }
@@ -373,6 +440,7 @@ function trackOfTask(task) {
     albumId: str(src.albumId),
     albumAudioId: str(src.albumAudioId),
     duration: num(src.duration, 0),
+    audioUrl: str(src.audioUrl),
     relateGoods: Array.isArray(src.relateGoods) ? src.relateGoods : []
   }
 }
@@ -627,16 +695,35 @@ async function requestSongUrl(ctx, params, log, verifyState) {
   return { res, verifyError }
 }
 
-async function resolveAudio(ctx, track, preferredQuality, log) {
+async function resolveAudio(ctx, track, preferredQuality, log, opts) {
+  const options = opts || {}
   if (!track || !track.hash) {
     return { ok: false, error: '这首歌没有 hash（本地/云盘歌曲无法解析播放地址）', attempts: [] }
   }
   if (!hasHostApi(ctx)) {
     return { ok: false, error: '宿主缺少本地接口通道（需要 EchoMusic ≥ 2.3.2-beta.2）', attempts: [] }
   }
+
+  // ① 优先复用宿主已经解析好的地址（当前正在播的这首）——不发请求、不触发风控
+  const host = hostPlaybackUrls(ctx, track, preferredQuality)
+  const hostUsable = options.preferHostUrl !== false && host.current && host.allowed
+  if (hostUsable) {
+    const ext = extFromUrl(host.urls[0])
+    log('复用宿主已解析的播放地址', host.quality || ext || '未知音质')
+    return {
+      ok: true,
+      urls: host.urls,
+      quality: host.quality || (ext === 'flac' ? 'flac' : ''),
+      hash: track.hash,
+      ext,
+      source: 'host',
+      attempts: []
+    }
+  }
+
   const qualities = candidateQualities(track, preferredQuality)
   const attempts = []
-  const verifyState = { done: false }
+  const verifyState = { done: false, ok: false, error: '' }
   let needsVerify = false
   for (const quality of qualities) {
     const hash = pickHashForQuality(track, quality)
@@ -666,6 +753,7 @@ async function resolveAudio(ctx, track, preferredQuality, log) {
         ext: pickExt(res.body, urls[0]),
         errorCode,
         status: res.status,
+        source: 'api',
         attempts
       }
     }
@@ -679,6 +767,22 @@ async function resolveAudio(ctx, track, preferredQuality, log) {
       error: verifyError || describeFailure(res.body, res.status, errorCode)
     })
   }
+
+  // ② 上游全部失败（常见是风控）时，曲目身上残留的宿主地址还能救一把
+  if (host.urls.length && !host.current) {
+    const ext = extFromUrl(host.urls[0])
+    log('上游取地址失败，改用曲目上残留的宿主地址兜底')
+    return {
+      ok: true,
+      urls: host.urls,
+      quality: ext === 'flac' ? 'flac' : '',
+      hash: track.hash,
+      ext,
+      source: 'stale',
+      attempts
+    }
+  }
+
   const last = attempts[attempts.length - 1]
   return {
     ok: false,
@@ -968,6 +1072,7 @@ export async function activate(ctx) {
     out.concurrency = clamp(out.concurrency, 1, 2)
     out.chunked = !!out.chunked
     out.confirmBeforeDownload = !!out.confirmBeforeDownload
+    out.preferHostUrl = !!out.preferHostUrl
     out.toastOnDone = !!out.toastOnDone
     out.sidebarEntry = !!out.sidebarEntry
     out.toolbarEntry = !!out.toolbarEntry
@@ -1060,6 +1165,7 @@ export async function activate(ctx) {
       album: track.album,
       quality: qualityOverride && qualityOverride !== 'auto' ? qualityOverride : state.settings.quality,
       actualQuality: '',
+      source: '', // host = 复用宿主已解析地址；stale = 曲目上残留的宿主地址；api = 自己走 /song/url
       status: 'pending',
       phaseText: '排队中',
       loaded: 0,
@@ -1132,8 +1238,11 @@ export async function activate(ctx) {
       // 确认框里如果已经解析过（用户先选位置再开始），直接复用：省一次请求、少一次风控机会
       let resolved =
         isObj(task.preResolved) && Array.isArray(task.preResolved.urls) && task.preResolved.urls.length ? task.preResolved : null
-      const reused = !!resolved
-      if (!resolved) resolved = await resolveAudio(ctx, track, task.quality, log)
+      let usedCached = !!resolved
+      if (!resolved) {
+        resolved = await resolveAudio(ctx, track, task.quality, log, { preferHostUrl: state.settings.preferHostUrl })
+        usedCached = !!(resolved.ok && (resolved.source === 'host' || resolved.source === 'stale'))
+      }
       if (isCanceled()) {
         const note = await cleanupSaveTarget(task.id, log)
         patch(task, { status: 'canceled', endedAt: Date.now(), phaseText: '已取消' + note })
@@ -1155,6 +1264,7 @@ export async function activate(ctx) {
         status: 'downloading',
         phaseText: '下载中…',
         actualQuality: resolved.quality,
+        source: resolved.source || '',
         attempts: (resolved.attempts || []).length,
         fileName
       })
@@ -1180,13 +1290,13 @@ export async function activate(ctx) {
 
       let result = await downloadBytes(ctx, resolved.urls, dlOptions)
 
-      // 预解析的地址可能已过期（用户在系统保存对话框上停留了很久）：重新解析一次再试
-      if (!result.ok && !result.canceled && reused && !isCanceled()) {
-        log('预解析地址下载失败，重新解析一次', result.error)
-        const again = await resolveAudio(ctx, track, task.quality, log)
+      // 用的是「宿主的地址」或「确认框里预解析的地址」时，失败就退回自己重新解析一次再试
+      if (!result.ok && !result.canceled && usedCached && !isCanceled()) {
+        log('复用地址下载失败，重新解析一次', result.error)
+        const again = await resolveAudio(ctx, track, task.quality, log, { preferHostUrl: false })
         if (again.ok) {
           resolved = again
-          patch(task, { actualQuality: again.quality, attempts: (again.attempts || []).length })
+          patch(task, { actualQuality: again.quality, source: again.source || '', attempts: (again.attempts || []).length })
           result = await downloadBytes(ctx, resolved.urls, dlOptions)
         }
       }
@@ -1240,6 +1350,7 @@ export async function activate(ctx) {
         at: Date.now(),
         url: resolved.urls[0] || '',
         viaChunked: !!result.viaChunked,
+        source: resolved.source || '',
         warning,
         needsVerify: false,
         ok: true
@@ -1278,6 +1389,7 @@ export async function activate(ctx) {
         at: Date.now(),
         url: '',
         viaChunked: false,
+        source: task.source || '',
         warning: '',
         needsVerify,
         ok: false,
@@ -1484,7 +1596,7 @@ export async function activate(ctx) {
     }
     const quality = state.settings.quality
     notice('正在解析播放地址…')
-    const resolved = await resolveAudio(ctx, track, quality, log)
+    const resolved = await resolveAudio(ctx, track, quality, log, { preferHostUrl: state.settings.preferHostUrl })
     if (!resolved.ok) {
       notice('解析失败：' + resolved.error + '（没有创建任何文件）')
       return null
@@ -1514,7 +1626,9 @@ export async function activate(ctx) {
       return
     }
     notice('正在解析直链…')
-    const resolved = await resolveAudio(ctx, track, qualityOverride || state.settings.quality, log)
+    const resolved = await resolveAudio(ctx, track, qualityOverride || state.settings.quality, log, {
+      preferHostUrl: state.settings.preferHostUrl
+    })
     if (!resolved.ok) {
       notice('解析失败：' + resolved.error)
       return
@@ -1545,6 +1659,7 @@ export async function activate(ctx) {
           artist: t.artist,
           quality: t.quality,
           actualQuality: t.actualQuality,
+          source: t.source,
           status: t.status,
           fileName: t.fileName,
           bytes: t.bytes,
@@ -1828,6 +1943,13 @@ export async function activate(ctx) {
         h('span', { class: 'sd-muted' }, taskTimeText(task))
       ]),
       task.fileName ? h('div', { class: 'sd-muted sd-mono' }, '文件名：' + task.fileName) : null,
+      task.source === 'host' || task.source === 'stale'
+        ? h(
+            'div',
+            { class: 'sd-muted', 'data-role': 'task-source' },
+            '音源：' + (task.source === 'host' ? '宿主已解析地址（未请求上游）' : '曲目上残留的宿主地址（兜底，未请求上游）')
+          )
+        : null,
       task.warning ? h('div', { class: 'sd-warn' }, '⚠ ' + task.warning) : null,
       task.needsVerify
         ? h('div', { class: 'sd-warn', 'data-role': 'needs-verify' }, '⚠ 需要完成酷狗安全验证：点「重试」会再次唤起验证弹窗')
@@ -1868,6 +1990,8 @@ export async function activate(ctx) {
                 h('div', { class: 'sd-row-chips' }, [
                   h('span', { class: 'sd-chip' }, item.ok ? formatBytes(item.bytes) : '—'),
                   item.viaChunked ? h('span', { class: 'sd-chip' }, '分片') : null,
+                  item.source === 'host' ? h('span', { class: 'sd-chip' }, '宿主地址') : null,
+                  item.source === 'stale' ? h('span', { class: 'sd-chip' }, '残留地址') : null,
                   item.warning ? h('span', { class: 'sd-chip sd-chip-warn', title: item.warning }, '体积偏小') : null
                 ]),
                 h('div', { class: 'sd-task-actions' }, [
@@ -2024,6 +2148,11 @@ export async function activate(ctx) {
           h('section', { class: 'sd-card' }, [
             h('div', { class: 'sd-card-head' }, h('h3', null, '下载')),
             toggle('confirmBeforeDownload', '下载前弹确认框', '每次下载前弹窗确认音质 / 保存位置 / 文件名；关掉则直接用下面的默认设置开始下载'),
+            toggle(
+              'preferHostUrl',
+              '复用宿主已解析的播放地址',
+              '正在播放的那首歌直接用播放器已经解析好的地址（音质跟随播放音质）——不发请求，也就不会触发风控；其它曲子仍走接口'
+            ),
             select('quality', '默认音质', '「自动」= 该歌可用的最高音质；不可用时自动逐级降级', [
               ['auto', '自动（最优可用）'],
               ['flac', 'FLAC'],
@@ -2197,7 +2326,7 @@ export async function activate(ctx) {
       dlg.busy = true
       dlg.error = ''
       try {
-        const resolved = await resolveAudio(ctx, list[0].track, quality, log)
+        const resolved = await resolveAudio(ctx, list[0].track, quality, log, { preferHostUrl: state.settings.preferHostUrl })
         if (gen !== dlgGen) return
         if (!resolved.ok) {
           dlg.error = '解析失败：' + resolved.error + '（没有创建任何文件）'
@@ -2283,6 +2412,23 @@ export async function activate(ctx) {
     const multi = dlg.tracks.length > 1
     const curQuality = dlgEffectiveQuality()
 
+    // 单曲且正在播放 + 开了「复用宿主地址」时，提前告诉用户这条不会走接口
+    const hostHint = (() => {
+      if (multi || !first || !state.settings.preferHostUrl) return ''
+      let h = null
+      try {
+        h = hostPlaybackUrls(ctx, first.track, dlg.quality)
+      } catch {
+        h = null
+      }
+      if (!h || !h.current || !h.allowed) return ''
+      return (
+        '这首正在播放：直接复用宿主已解析的地址（' +
+        (h.quality ? QUALITY_LABEL[h.quality] || h.quality : '音质跟随播放音质') +
+        '），不请求上游，也就不会触发风控'
+      )
+    })()
+
     const songsBlock = multi
       ? h('div', { class: 'sd-dlg-songs', 'data-role': 'dlg-songs' }, [
           ...dlg.tracks.slice(0, 6).map((x, i) =>
@@ -2315,7 +2461,8 @@ export async function activate(ctx) {
           })
         )
       ),
-      h('div', { class: 'sd-muted' }, multi ? '批量下载时每首歌各自按这个音质取，取不到会自动降级' : '实际会使用：' + (QUALITY_LABEL[curQuality] || curQuality))
+      h('div', { class: 'sd-muted' }, multi ? '批量下载时每首歌各自按这个音质取，取不到会自动降级' : '实际会使用：' + (QUALITY_LABEL[curQuality] || curQuality)),
+      hostHint ? h('div', { class: 'sd-muted', 'data-role': 'dlg-host-hint' }, hostHint) : null
     ])
 
     const destBlock = h('div', { class: 'sd-dlg-block' }, [
@@ -2859,7 +3006,11 @@ export async function activate(ctx) {
     clearHistory,
     copyDirectLink,
     copyDiagnostics,
-    resolveAudio,
+    resolveAudio: (track, quality, opts) =>
+      resolveAudio(ctx, normalizeTrack(track) || {}, quality || state.settings.quality, log, {
+        preferHostUrl: state.settings.preferHostUrl,
+        ...(opts || {})
+      }),
     currentTrack,
     readQueue,
     toNormalized,

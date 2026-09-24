@@ -218,6 +218,38 @@ const MUTANTS = [
     name: '失败任务不标记 needsVerify（界面不再提示去完成验证）',
     from: `      const needsVerify = !!(e && e.needsVerify)`,
     to: `      const needsVerify = false`
+  },
+  {
+    name: '完全不复用宿主已解析地址（风控账号下永远下载不了正在播的歌）',
+    from: `  const hostUsable = options.preferHostUrl !== false && host.current && host.allowed`,
+    to: `  const hostUsable = false`
+  },
+  {
+    name: '不校验「是不是当前曲目」就用缓存地址（会把旧曲目的地址当当前的用）',
+    from: `  if (isCurrent && primary) {`,
+    to: `  if (primary) {`
+  },
+  {
+    name: '不比对音质（请求 FLAC 也拿宿主的 320K 地址糊弄）',
+    from: `    out.allowed = hostQualityCovers(out.quality, preferredQuality)`,
+    to: `    out.allowed = true`
+  },
+  {
+    name: '归一化时丢掉 audioUrl（「上游失败 → 残留地址兜底」永远走不到 —— 真被测试抓到过）',
+    from: `    audioUrl: str(raw.audioUrl),
+    source: str(raw.source).toLowerCase(),`,
+    to: `    audioUrl: '',
+    source: str(raw.source).toLowerCase(),`
+  },
+  {
+    name: '宿主地址失效后不回退到 /song/url（地址一过期就彻底失败）',
+    from: `      if (!result.ok && !result.canceled && usedCached && !isCanceled()) {`,
+    to: `      if (false) {`
+  },
+  {
+    name: '上游全部失败时不用残留的宿主地址兜底',
+    from: `  if (host.urls.length && !host.current) {`,
+    to: `  if (false) {`
   }
 ]
 

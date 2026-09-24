@@ -422,10 +422,12 @@ const net = {
   throwOnCall: 0,
   beforeChunk: null,
   notFoundOn: 0,
+  failPattern: null, // 命中该正则的 URL 直接 500（用来测「宿主地址失效 → 回退 /song/url」）
   async request(opts) {
     const call = { url: opts.url, headers: opts.headers || {}, responseType: opts.responseType, maxResponseBytes: opts.maxResponseBytes }
     net.calls.push(call)
     const index = net.calls.length
+    if (net.failPattern && net.failPattern.test(String(opts.url))) return { status: 500, headers: {}, data: abOf(Buffer.from('host stale')) }
     if (net.beforeChunk) await net.beforeChunk(index, call)
     if (net.throwOnCall === index) throw new Error('net::ERR_CONNECTION_RESET')
     if (net.notFoundOn === index) return { status: 404, headers: {}, data: abOf(Buffer.from('not found')) }
@@ -554,6 +556,14 @@ function makeCtx(options) {
     disposers: []
   }
   const currentTrack = V.ref(o.currentTrack === undefined ? FLAC_TRACK : o.currentTrack)
+  // 播放器 store：宿主把「当前曲目已解析好的播放地址」放在这里（currentAudioUrl 等）。
+  // 默认留空 —— 这样老用例走的还是「自己请求 /song/url」那条路；要测「复用宿主地址」再显式设置。
+  const playerState = {
+    currentTrackId: '',
+    currentAudioUrl: '',
+    currentAudioCandidateUrls: [],
+    currentResolvedAudioQuality: null
+  }
   // 播放栏容器（宿主那边是 `.player-actions` 右侧动作区）。
   // 默认**不**建：真实场景里它是后出现的，插件必须先等宿主把页面渲染出来。
   if (o.withBarHost) {
@@ -668,6 +678,9 @@ function makeCtx(options) {
     },
     player: { currentTrack },
     stores: {
+      get player() {
+        return playerState
+      },
       playlist: {
         get activeQueue() {
           return { songs: queueRef.value }
@@ -695,6 +708,10 @@ function makeCtx(options) {
   records.setQueue = (list) => {
     queueRef.value = list
   }
+  records.playerState = playerState
+  records.setPlayerState = (patch) => Object.assign(playerState, patch)
+  records.resetPlayerState = () =>
+    Object.assign(playerState, { currentTrackId: '', currentAudioUrl: '', currentAudioCandidateUrls: [], currentResolvedAudioQuality: null })
   records.queueRef = queueRef
   records.storage = storage
   records.currentTrack = currentTrack
@@ -1264,7 +1281,7 @@ async function main() {
   eq(findByProp(sTree, 'data-setting', 'chunked') !== null, true, '有分片开关')
   eq(findByProp(sTree, 'data-setting', 'quality') !== null, true, '有音质选项')
   eq(findByProp(sTree, 'data-setting', 'fileNameTemplate') !== null, true, '有文件名模板输入')
-  eq(countByProp(sTree, 'role', 'switch'), 7, '7 个开关（确认框/分片/完成提示/侧边栏/工具栏/播放栏/调试）')
+  eq(countByProp(sTree, 'role', 'switch'), 8, '8 个开关（确认框/宿主地址/分片/完成提示/侧边栏/工具栏/播放栏/调试）')
 
   const chunkSwitch = findByProp(sTree, 'data-setting', 'chunked')
   const innerSwitch = walk(chunkSwitch).find((n) => n.props && n.props.role === 'switch')
@@ -1693,6 +1710,100 @@ async function main() {
   eq(asOk.saveMethod, 'picker', '仍然写进用户选的位置')
   delete window.showSaveFilePicker
   apiOut.state.settings.confirmBeforeDownload = false
+
+  /* -------------------------------------------------- 28. 复用宿主已解析地址 */
+  section('28. 复用宿主已解析的播放地址（避开风控）')
+  await waitFor(() => apiOut.state.tasks.every((t) => t.status !== 'downloading' && t.status !== 'resolving' && t.status !== 'saving'), '先等任务收敛')
+  first.records.currentTrack.value = FLAC_TRACK
+  apiOut.state.settings.confirmBeforeDownload = false
+  apiOut.state.settings.preferHostUrl = true
+  apiOut.state.settings.quality = 'auto'
+  api.handler = null
+  net.mode = 'range'
+  net.failPattern = null
+  net.file = makeBytes(360 * 1024, 59)
+
+  // 播放器 store 里就是宿主已经解析好的地址
+  first.records.setPlayerState({
+    currentTrackId: String(FLAC_TRACK.id),
+    currentAudioUrl: 'https://cdn.test/host-stream.flac',
+    currentAudioCandidateUrls: ['https://cdn.test/host-backup.flac'],
+    currentResolvedAudioQuality: 'flac'
+  })
+
+  api.calls.length = 0
+  net.calls.length = 0
+  tree = renderOf(page)
+  await findByProp(tree, 'data-action', 'download-current').props.onClick()
+  await waitFor(() => apiOut.state.tasks.length > 0 && apiOut.state.tasks[apiOut.state.tasks.length - 1].status === 'done', '走宿主地址的任务完成')
+  const hostTask = apiOut.state.tasks[apiOut.state.tasks.length - 1]
+  eq(api.calls.length, 0, '完全不请求 /song/url（所以也不会碰风控）')
+  eq(hostTask.source, 'host', '标记音源 = 宿主地址')
+  eq(hostTask.actualQuality, 'flac', '音质取宿主已解析的那档')
+  eq(hostTask.bytes, net.file.length, '字节数正确')
+  eq(String(hostTask.directUrl).startsWith('https://cdn.test/host-stream'), true, '用的就是播放器正在播的地址')
+  eq(net.calls.length >= 1, true, '直接从 CDN 取字节')
+  includes(String(net.calls[0].url), 'host-stream', '第一次请求就是宿主地址')
+  tree = renderOf(page)
+  includes(textOf(tree), '音源：宿主已解析地址', '任务行写明了音源')
+  eq(findByProp(tree, 'data-role', 'task-source') !== null, true, '任务行有音源标记')
+
+  // 关掉这个开关 → 回到自己请求 /song/url
+  apiOut.state.settings.preferHostUrl = false
+  api.calls.length = 0
+  const apiTask = (await apiOut.startDownloads([FLAC_TRACK], 'auto'))[0]
+  await waitFor(() => apiTask.status === 'done', '关掉开关后走接口')
+  eq(api.calls.length >= 1, true, '关掉后重新请求 /song/url')
+  eq(apiTask.source, 'api', '音源标记回 api')
+  apiOut.state.settings.preferHostUrl = true
+
+  // 请求的音质比宿主已解析的更高 → 不能偷懒，老老实实去请求
+  first.records.setPlayerState({ currentResolvedAudioQuality: '320' })
+  api.calls.length = 0
+  const higherTask = (await apiOut.startDownloads([FLAC_TRACK], 'flac'))[0]
+  await waitFor(() => higherTask.status === 'done', '高音质请求完成')
+  eq(api.calls.length >= 1, true, '要 FLAC 而宿主只有 320K 时仍然去请求上游')
+  eq(higherTask.source, 'api', '音源标记 api')
+
+  // 宿主地址失效（比如早就过期）→ 自动回退到 /song/url
+  first.records.setPlayerState({ currentResolvedAudioQuality: 'flac' })
+  net.failPattern = /host-stream|host-backup/
+  api.calls.length = 0
+  const hostFailTask = (await apiOut.startDownloads([FLAC_TRACK], 'auto'))[0]
+  await waitFor(() => hostFailTask.status === 'done' || hostFailTask.status === 'failed', '宿主地址失效后收敛')
+  eq(hostFailTask.status, 'done', '宿主地址失效也能下下来')
+  eq(hostFailTask.source, 'api', '回退后音源变成 api')
+  eq(api.calls.length >= 1, true, '回退时确实请求了 /song/url')
+  net.failPattern = null
+
+  // 非当前曲目：上游风控失败时，用曲目上残留的宿主地址兜底
+  first.records.resetPlayerState()
+  const playedBefore = { ...LOW_TRACK, audioUrl: 'https://cdn.test/stale-stream.mp3' }
+  first.records.currentTrack.value = FLAC_TRACK // 当前播的是别的歌
+  api.handler = () => ({ status: 502, body: { status: 0, error_code: 20028, msg: '本次请求需要验证' } })
+  const staleTask = (await apiOut.startDownloads([playedBefore], 'auto'))[0]
+  await waitFor(() => staleTask.status === 'done' || staleTask.status === 'failed', '残留地址兜底收敛')
+  eq(staleTask.status, 'done', '上游失败但靠残留的宿主地址救回来了')
+  eq(staleTask.source, 'stale', '标记音源 = 残留地址')
+  includes(String(staleTask.directUrl), 'stale-stream', '用的是曲目上残留的地址')
+  api.handler = null
+
+  // 确认框里会提前说明「这首正在播，直接用宿主地址」
+  first.records.currentTrack.value = FLAC_TRACK
+  first.records.setPlayerState({
+    currentTrackId: String(FLAC_TRACK.id),
+    currentAudioUrl: 'https://cdn.test/host-stream.flac',
+    currentAudioCandidateUrls: [],
+    currentResolvedAudioQuality: 'flac'
+  })
+  apiOut.state.settings.confirmBeforeDownload = true
+  tree = renderOf(page)
+  await findByProp(tree, 'data-action', 'download-current').props.onClick()
+  dTree = renderOf(dialogComponent)
+  eq(findByProp(dTree, 'data-role', 'dlg-host-hint') !== null, true, '确认框里提示会复用宿主地址')
+  includes(textOf(dTree), '不会触发风控', '说明了这样做的原因')
+  apiOut.closeDownloadDialog()
+  first.records.resetPlayerState()
 
   /* -------------------------------------------------- 25. dispose 回收 */
   section('25. dispose 回收在跑的任务与全局监听')
