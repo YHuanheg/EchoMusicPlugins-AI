@@ -258,22 +258,18 @@ const MUTANTS = [
   },
   {
     name: '注册任务条目时漏掉 retention（真机上宿主会直接抛「保留策略无效」）',
-    from: `          retention: {
-            completed: { mode: 'auto', delayMs: 8000 },
-            error: { mode: 'manual' },
-            aborted: { mode: 'auto', delayMs: 3000 }
-          }`,
-    to: `          retention: undefined`
+    from: `        handle = ctx.tasks.register({ id: PLUGIN_ID + ':' + key, ...info, retention: CENTER_RETENTION })`,
+    to: `        handle = ctx.tasks.register({ id: PLUGIN_ID + ':' + key, ...info, retention: undefined })`
   },
   {
     name: '任务 id 占用宿主保留前缀 echo:',
-    from: `          id: PLUGIN_ID + ':' + task.id,`,
-    to: `          id: 'echo:' + task.id,`
+    from: `        handle = ctx.tasks.register({ id: PLUGIN_ID + ':' + key, ...info, retention: CENTER_RETENTION })`,
+    to: `        handle = ctx.tasks.register({ id: 'echo:' + key, ...info, retention: CENTER_RETENTION })`
   },
   {
     name: '进度百分比恒为 0（面板进度条不动）',
-    from: `      progress: { percent: taskProgress(task), label: centerLabel(task) },`,
-    to: `      progress: { percent: 0, label: centerLabel(task) },`
+    from: `    if (pct !== null) progress.percent = pct`,
+    to: `    progress.percent = 0`
   },
   {
     name: '完成态映射错（面板永远显示「进行中」）',
@@ -303,9 +299,13 @@ const MUTANTS = [
   },
   {
     name: '移除本地任务时不摘面板条目（任务中心留一堆幽灵行）',
-    from: `    if (idx >= 0) state.tasks.splice(idx, 1)
+    from: `      syncCenterGroup(task.group)
+      return
+    }
     dismissCenterTask(task.id)`,
-    to: `    if (idx >= 0) state.tasks.splice(idx, 1)`
+    to: `      syncCenterGroup(task.group)
+      return
+    }`
   },
   {
     name: '关掉任务中心开关时不清场（旧条目留一辈子）',
@@ -358,6 +358,55 @@ const MUTANTS = [
     name: '卸载时不清空挂载表（关掉开关按钮还在）',
     from: `    for (const [group, rec] of [...barMounts.entries()]) {`,
     to: `    for (const [group, rec] of []) {`
+  },
+  {
+    name: '总大小未知时返回 0（进度条卡在 0%，看着像卡死）',
+    from: `    if (!task.total) return task.status === 'done' ? 100 : null`,
+    to: `    if (!task.total) return task.status === 'done' ? 100 : 0`
+  },
+  {
+    name: '速度用瞬时值（数字乱跳、剩余时间乱飞）',
+    from: `    while (samples.length > 2 && now - samples[0].t > 4000) samples.shift()`,
+    to: `    while (samples.length > 2) samples.shift()`
+  },
+  {
+    name: '剩余时间不看总大小（会算出负数）',
+    from: `    if (!task.total || task.total <= task.loaded) return 0`,
+    to: `    if (false) return 0`
+  },
+  {
+    name: '批量下载不合并成父条目（任务中心逐首占行，看不到总体进度）',
+    from: `    if (task.group) {
+      syncCenterGroup(task.group)
+      return
+    }`,
+    to: `    if (false) {
+      syncCenterGroup(task.group)
+      return
+    }`
+  },
+  {
+    name: '批量父条目不输出 items（看不到每首歌）',
+    from: `      items: tasks.map((t) => ({`,
+    to: `      items: [].map((t) => ({`
+  },
+  {
+    name: '批量里歌都移除后不摘父条目（任务中心留空壳）',
+    from: `    if (!tasks.length) {
+      dismissCenterEntry(centerGroups, 'batch-' + groupId)
+      return
+    }`,
+    to: `    if (false) {
+      dismissCenterEntry(centerGroups, 'batch-' + groupId)
+      return
+    }`
+  },
+  {
+    name: '总体进度不算排队中的任务（两首之间进度条跳回 0%）',
+    from: `    const all = state.tasks.filter(
+      (t) => t.status === 'pending' || t.status === 'downloading' || t.status === 'resolving' || t.status === 'saving'
+    )`,
+    to: `    const all = state.tasks.filter((t) => t.status === 'downloading' || t.status === 'resolving' || t.status === 'saving')`
   }
 ]
 

@@ -425,6 +425,47 @@
   margin-top: 9px;
 }
 
+/* 总大小未知（服务端不给 Content-Length / 关掉分片）时的「不确定进度条」：
+   一条来回扫的光带，明确表达「在动，但算不出百分比」，比卡在 0% 强得多 */
+.sd-bar-unknown {
+  position: relative;
+}
+
+.sd-bar-fill-unknown {
+  width: 38%;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--color-primary, #31cfa1);
+  animation: sd-sweep 1.15s ease-in-out infinite;
+}
+
+@keyframes sd-sweep {
+  0% {
+    transform: translateX(-110%);
+  }
+  100% {
+    transform: translateX(275%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sd-bar-fill-unknown {
+    animation: none;
+    width: 100%;
+    opacity: 0.4;
+  }
+}
+
+/* 总体进度卡的第二行：左边文案、右边速度/剩余时间 */
+.sd-foot-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 6px;
+  font-size: 11px;
+}
+
 .sd-bar-fill {
   height: 100%;
   border-radius: 999px;

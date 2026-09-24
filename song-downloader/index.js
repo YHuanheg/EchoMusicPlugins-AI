@@ -1218,6 +1218,7 @@ export async function activate(ctx) {
   let taskSeq = 0
   let heartbeat = null
   let centerEnabled = false // 任务中心同步开关（真的生效还要看宿主有没有 ctx.tasks）
+  let groupSeq = 0 // 批量下载分组序号
 
   function setSetting(key, value) {
     if (!(key in DEFAULT_SETTINGS)) return
@@ -1279,6 +1280,7 @@ export async function activate(ctx) {
       warning: '',
       needsVerify: false,
       preResolved: null, // 确认框里已解析好的地址（避免重复请求 / 地址过期时会在执行时兜底重解析）
+      group: '', // 批量下载的分组 id（>1 首时才有）：任务中心把它们收进一个父条目
       src: trackSnapshot(track)
     }
     state.tasks.push(task)
@@ -1305,7 +1307,14 @@ export async function activate(ctx) {
    * ⚠️ id 不能以 `echo:` 开头（宿主保留给内置任务），所以用 `<插件id>:<任务id>`。
    */
 
+  const CENTER_RETENTION = {
+    // 完成 8 秒后自动消失（够看清结果，又不会在批量下载后堆一屏）；失败常驻等处理；中止 3 秒后消失
+    completed: { mode: 'auto', delayMs: 8000 },
+    error: { mode: 'manual' },
+    aborted: { mode: 'auto', delayMs: 3000 }
+  }
   const centerHandles = new Map() // taskId → { handle, phase: 'pending'|'running'|'terminal' }
+  const centerGroups = new Map() // groupId → 同上（批量下载的父条目）
 
   function hasTasksApi() {
     return !!(ctx.tasks && typeof ctx.tasks.register === 'function')
@@ -1325,7 +1334,13 @@ export async function activate(ctx) {
     if (task.status === 'resolving') return '解析播放地址…'
     if (task.status === 'downloading') {
       const size = task.total ? formatBytes(task.loaded) + ' / ' + formatBytes(task.total) : task.loaded ? formatBytes(task.loaded) : '大小未知'
-      return '下载中 ' + pct + '% · ' + size + (task.speed > 0 ? ' · ' + formatSpeed(task.speed) : '')
+      const eta = taskEtaMs(task)
+      return (
+        (pct === null ? '下载中 · ' : '下载中 ' + pct + '% · ') +
+        size +
+        (task.speed > 0 ? ' · ' + formatSpeed(task.speed) : '') +
+        (eta > 0 ? ' · 剩余约 ' + formatSeconds(eta) : '')
+      )
     }
     if (task.status === 'saving') return '写入文件…'
     if (task.status === 'done') {
@@ -1333,6 +1348,31 @@ export async function activate(ctx) {
     }
     if (task.status === 'canceled') return '已取消'
     return '失败'
+  }
+
+  /** 单曲在批量条目里的「状态标签」（放在 items 那一列） */
+  function centerItemStatus(task) {
+    const pct = taskProgress(task)
+    if (task.status === 'pending') return '排队中'
+    if (task.status === 'resolving') return '解析地址…'
+    if (task.status === 'downloading') return pct === null ? '下载中' : '下载中 ' + pct + '%'
+    if (task.status === 'saving') return '写入中'
+    if (task.status === 'done') return '已完成 · ' + formatBytes(task.bytes)
+    if (task.status === 'canceled') return '已取消'
+    return '失败'
+  }
+
+  function centerItemDesc(task) {
+    const label = QUALITY_LABEL[task.actualQuality || task.quality] || task.actualQuality || task.quality || '自动'
+    const size = task.total ? formatBytes(task.loaded) + ' / ' + formatBytes(task.total) : task.loaded ? formatBytes(task.loaded) : ''
+    const eta = task.status === 'downloading' ? taskEtaMs(task) : 0
+    return (
+      label +
+      (size ? ' · ' + size : '') +
+      (task.status === 'downloading' && task.speed > 0 ? ' · ' + formatSpeed(task.speed) : '') +
+      (eta > 0 ? ' · 剩余约 ' + formatSeconds(eta) : '') +
+      (task.source ? ' · ' + sourceText(task.source) : '')
+    )
   }
 
   function centerActions(task) {
@@ -1349,45 +1389,96 @@ export async function activate(ctx) {
   }
 
   function centerPatch(task) {
+    const pct = taskProgress(task)
+    const progress = { label: centerLabel(task) }
+    if (pct !== null) progress.percent = pct // 总大小未知就不给百分比：宿主只显示文案、不画假进度条
     const patch = {
       name: task.name + (task.artist ? ' · ' + task.artist : ''),
       status: centerStatusOf(task),
-      progress: { percent: taskProgress(task), label: centerLabel(task) },
+      progress,
       actions: centerActions(task)
     }
     if (task.status === 'failed') patch.error = task.error
     return patch
   }
 
-  /** 把任务状态同步到任务中心；用 patch() 作为唯一入口，所以任何状态变化都会走到这里 */
-  function syncCenterTask(task) {
-    if (!task || !centerEnabled || !hasTasksApi()) return
-    const info = centerPatch(task)
+  /** 批量下载：一个父条目 + 每首歌一行 items（比 N 个并列条目更好看，也能看到总体进度） */
+  function centerGroupPatch(tasks) {
+    const total = tasks.length
+    const done = tasks.filter((t) => t.status === 'done').length
+    const failed = tasks.filter((t) => t.status === 'failed').length
+    const canceled = tasks.filter((t) => t.status === 'canceled').length
+    const active = tasks.filter((t) => t.status !== 'done' && t.status !== 'failed' && t.status !== 'canceled')
+    const loaded = tasks.reduce((a, t) => a + num(t.loaded, 0), 0)
+    const sizeTotal = tasks.reduce((a, t) => a + num(t.total, 0), 0)
+    const speed = tasks.reduce((a, t) => a + num(t.speed, 0), 0)
+    // 百分比按「整首完成 + 当前这首的完成度」算，比按字节更直观
+    const fraction = tasks.reduce((a, t) => {
+      if (t.status === 'done' || t.status === 'failed' || t.status === 'canceled') return a + 1
+      const pct = taskProgress(t)
+      return a + (pct === null ? 0 : pct / 100)
+    }, 0)
+    const status = active.length
+      ? tasks.some((t) => t.status !== 'pending')
+        ? 'running'
+        : 'pending'
+      : failed
+        ? 'error'
+        : canceled === total
+          ? 'aborted'
+          : 'completed'
+    const finished = done + failed + canceled
+    const label =
+      '已完成 ' + done + '/' + total +
+      (failed ? ' · 失败 ' + failed : '') +
+      (loaded ? ' · ' + formatBytes(loaded) + (sizeTotal ? ' / ' + formatBytes(sizeTotal) : '') : '') +
+      (speed > 0 ? ' · ' + formatSpeed(speed) : '')
+    const patch = {
+      name: '批量下载 · ' + total + ' 首',
+      status,
+      progress: { percent: Math.min(100, Math.round((fraction / total) * 100)), label: finished === total ? label + ' · 全部结束' : label },
+      actions: active.length ? [{ id: 'cancel-all', label: '全部停止', variant: 'ghost', onClick: () => cancelAll() }] : [],
+      items: tasks.map((t) => ({
+        id: t.id,
+        name: t.name + (t.artist ? ' · ' + t.artist : ''),
+        description: centerItemDesc(t),
+        statusLabel: centerItemStatus(t),
+        error: t.status === 'failed' ? t.error : '',
+        actions: centerActions(t)
+      }))
+    }
+    if (failed) {
+      const first = tasks.find((t) => t.status === 'failed')
+      patch.error = (first && first.error) || '部分歌曲下载失败'
+    }
+    return patch
+  }
+
+  /** 统一的「注册 / 推进 / 收尾」——单曲与批量共用（store 传对应的 Map） */
+  function applyCenterEntry(store, key, info) {
     const terminal = info.status === 'completed' || info.status === 'error' || info.status === 'aborted'
-    let rec = centerHandles.get(task.id)
+    let rec = store.get(key)
     // 终止态只同步一次（finish 之后再 update 没意义，而且 aborted 的自动消失定时器只在 finish 里排）
     if (rec && rec.phase === 'terminal') return
     if (!rec || !rec.handle || !rec.handle.active) {
       // 重试 / 状态回退时：同 id 重新 register 会替换旧条目，所以先摘掉旧的
-      if (rec) dismissCenterTask(task.id)
+      if (rec) {
+        store.delete(key)
+        try {
+          if (rec.handle && typeof rec.handle.dismiss === 'function') rec.handle.dismiss()
+        } catch {
+          /* 忽略 */
+        }
+      }
       let handle = null
       try {
-        handle = ctx.tasks.register({
-          id: PLUGIN_ID + ':' + task.id,
-          ...info,
-          // 完成 8 秒后自动消失（够看清结果，又不会在批量下载后堆一屏）；失败常驻等处理；中止 3 秒后消失
-          retention: {
-            completed: { mode: 'auto', delayMs: 8000 },
-            error: { mode: 'manual' },
-            aborted: { mode: 'auto', delayMs: 3000 }
-          }
-        })
+        handle = ctx.tasks.register({ id: PLUGIN_ID + ':' + key, ...info, retention: CENTER_RETENTION })
       } catch (e) {
         log('注册任务中心条目失败', e)
         return
       }
       rec = { handle, phase: terminal ? 'terminal' : info.status === 'pending' ? 'pending' : 'running' }
-      centerHandles.set(task.id, rec)
+      store.set(key, rec)
       if (terminal) {
         try {
           rec.handle.finish(info.status, info)
@@ -1415,10 +1506,30 @@ export async function activate(ctx) {
     }
   }
 
-  function dismissCenterTask(taskId) {
-    const rec = centerHandles.get(taskId)
+  function syncCenterGroup(groupId) {
+    const tasks = state.tasks.filter((t) => t.group === groupId)
+    if (!tasks.length) {
+      dismissCenterEntry(centerGroups, 'batch-' + groupId)
+      return
+    }
+    applyCenterEntry(centerGroups, 'batch-' + groupId, centerGroupPatch(tasks))
+  }
+
+  /** 把任务状态同步到任务中心；用 patch() 作为唯一入口，所以任何状态变化都会走到这里 */
+  function syncCenterTask(task) {
+    if (!task || !centerEnabled || !hasTasksApi()) return
+    // 批量下载：只维护父条目（歌单在 items 里），不再逐首占一行
+    if (task.group) {
+      syncCenterGroup(task.group)
+      return
+    }
+    applyCenterEntry(centerHandles, task.id, centerPatch(task))
+  }
+
+  function dismissCenterEntry(store, key) {
+    const rec = store.get(key)
     if (!rec) return
-    centerHandles.delete(taskId)
+    store.delete(key)
     try {
       if (rec.handle && typeof rec.handle.dismiss === 'function') rec.handle.dismiss()
     } catch {
@@ -1426,8 +1537,13 @@ export async function activate(ctx) {
     }
   }
 
+  function dismissCenterTask(taskId) {
+    dismissCenterEntry(centerHandles, taskId)
+  }
+
   function dismissAllCenterTasks() {
     for (const taskId of [...centerHandles.keys()]) dismissCenterTask(taskId)
+    for (const groupId of [...centerGroups.keys()]) dismissCenterEntry(centerGroups, groupId)
   }
 
   /** 设置开关：关掉时把已有条目摘干净，打开时把当前任务补一遍 */
@@ -1438,7 +1554,12 @@ export async function activate(ctx) {
       if (enabled && !hasTasksApi()) log('宿主没有任务中心接口（ctx.tasks），跳过')
       return
     }
-    for (const task of state.tasks) syncCenterTask(task)
+    const groups = new Set()
+    for (const task of state.tasks) {
+      if (task.group) groups.add(task.group)
+      else syncCenterTask(task)
+    }
+    for (const groupId of groups) syncCenterGroup(groupId)
   }
 
   function pump() {
@@ -1513,8 +1634,7 @@ export async function activate(ctx) {
         fileName
       })
 
-      let lastTickAt = Date.now()
-      let lastLoaded = 0
+      const speedSamples = [] // 滑动窗口速度（见 pushSpeedSample）；两次 downloadBytes 共用同一批样本
       const dlOptions = {
         chunked: !!state.settings.chunked,
         chunkSize: clamp(state.settings.chunkSizeMb, 1, 8) * 1024 * 1024,
@@ -1522,12 +1642,7 @@ export async function activate(ctx) {
         isCanceled,
         log,
         onProgress: (p) => {
-          const now = Date.now()
-          const dt = now - lastTickAt
-          const db = p.loaded - lastLoaded
-          lastTickAt = now
-          lastLoaded = p.loaded
-          const speed = dt > 0 ? (db / dt) * 1000 : 0
+          const speed = pushSpeedSample(speedSamples, p.loaded)
           patch(task, { loaded: p.loaded, total: p.total, speed })
         }
       }
@@ -1716,6 +1831,12 @@ export async function activate(ctx) {
         created.push(task)
       }
     }
+    if (created.length > 1) {
+      // 一次下多首 → 打同一个分组，任务中心用一个父条目 + 每首一行 items 展示（能看到总体进度）
+      groupSeq += 1
+      const groupId = 'g' + groupSeq.toString(36) + '-' + Date.now().toString(36)
+      for (const task of created) task.group = groupId
+    }
     if (created.length) {
       for (const task of created) syncCenterTask(task) // 立刻在任务中心占一行（排队中）
       startHeartbeat()
@@ -1761,18 +1882,26 @@ export async function activate(ctx) {
     if (!task) return
     const idx = state.tasks.findIndex((x) => x.id === task.id)
     if (idx >= 0) state.tasks.splice(idx, 1)
+    if (task.group) {
+      // 批量任务：重算父条目（最后一首被移除时父条目自动消失）
+      syncCenterGroup(task.group)
+      return
+    }
     dismissCenterTask(task.id)
   }
 
   function clearFinished() {
+    const groups = new Set()
     for (let i = state.tasks.length - 1; i >= 0; i--) {
       const task = state.tasks[i]
       const s = task.status
       if (s === 'done' || s === 'failed' || s === 'canceled') {
         state.tasks.splice(i, 1)
-        dismissCenterTask(task.id)
+        if (task.group) groups.add(task.group)
+        else dismissCenterTask(task.id)
       }
     }
+    for (const groupId of groups) syncCenterGroup(groupId)
   }
 
   function clearHistory() {
@@ -1959,9 +2088,44 @@ export async function activate(ctx) {
     return ''
   }
 
+  /**
+   * 进度百分比。
+   * ⚠️ 拿不到总大小时返回 **null**（而不是 0）—— 否则「没开分片 / 服务端不给 Content-Length」
+   * 的任务会整段显示 0%，看起来像卡死了。UI 见到 null 就画不确定进度条。
+   */
   function taskProgress(task) {
-    if (!task.total) return task.status === 'done' ? 100 : 0
+    if (!task.total) return task.status === 'done' ? 100 : null
     return Math.min(100, Math.max(0, Math.round((task.loaded / task.total) * 100)))
+  }
+
+  /**
+   * 滑动窗口速度：瞬时速度（两次 onProgress 之间）抖得没法看 —— 分片边界、CDN 抖动、
+   * 首包慢都会让「1.8 MB/s」下一秒变「300 KB/s」。用最近 ~4 秒的样本算平均，
+   * 数字稳、剩余时间也才敢显示。
+   */
+  function pushSpeedSample(samples, loaded, nowArg) {
+    const now = num(nowArg, Date.now())
+    samples.push({ t: now, loaded })
+    while (samples.length > 16) samples.shift()
+    while (samples.length > 2 && now - samples[0].t > 4000) samples.shift()
+    const last = samples[samples.length - 1]
+    const first = samples[0]
+    const dt = last.t - first.t
+    if (dt < 300) {
+      // 样本还太少：退回相邻两条
+      if (samples.length < 2) return 0
+      const prev = samples[samples.length - 2]
+      const gap = last.t - prev.t
+      return gap > 0 ? Math.max(0, ((last.loaded - prev.loaded) / gap) * 1000) : 0
+    }
+    return Math.max(0, ((last.loaded - first.loaded) / dt) * 1000)
+  }
+
+  /** 剩余时间（毫秒）；拿不到总大小或速度为 0 时返回 0（UI 不显示） */
+  function taskEtaMs(task) {
+    if (!task.total || task.total <= task.loaded) return 0
+    if (!(task.speed > 0)) return 0
+    return ((task.total - task.loaded) / task.speed) * 1000
   }
 
   function taskTimeText(task) {
@@ -1971,18 +2135,40 @@ export async function activate(ctx) {
     }
     if (!task.startedAt) return ''
     const elapsed = Date.now() - task.startedAt
-    if (task.status === 'downloading' && task.speed > 0 && task.total > task.loaded) {
-      return '已用 ' + formatSeconds(elapsed) + ' · 剩余约 ' + formatSeconds(((task.total - task.loaded) / task.speed) * 1000)
-    }
+    const eta = task.status === 'downloading' ? taskEtaMs(task) : 0
+    if (eta > 0) return '已用 ' + formatSeconds(elapsed) + ' · 剩余约 ' + formatSeconds(eta)
     return '已用 ' + formatSeconds(elapsed)
+  }
+
+  /** 一行的「已下载 / 总大小 · 速度」文案（总大小未知时只说已下载） */
+  function taskSizeText(task) {
+    if (task.total) return formatBytes(task.loaded) + ' / ' + formatBytes(task.total)
+    if (task.loaded) return '已下载 ' + formatBytes(task.loaded)
+    return '大小未知'
   }
 
   function overallProgress() {
     void state.beat
-    const active = state.tasks.filter((t) => t.status === 'downloading' || t.status === 'resolving' || t.status === 'saving')
-    const loaded = active.reduce((a, t) => a + num(t.loaded, 0), 0)
-    const total = active.reduce((a, t) => a + num(t.total, 0), 0)
-    return { count: active.length, loaded, total, pct: total ? Math.round((loaded / total) * 100) : 0 }
+    const all = state.tasks.filter(
+      (t) => t.status === 'pending' || t.status === 'downloading' || t.status === 'resolving' || t.status === 'saving'
+    )
+    const active = all.filter((t) => t.status !== 'pending')
+    const loaded = all.reduce((a, t) => a + num(t.loaded, 0), 0)
+    const total = all.reduce((a, t) => a + num(t.total, 0), 0)
+    const speed = all.reduce((a, t) => a + num(t.speed, 0), 0)
+    const finished = all.filter((t) => t.status === 'done' || t.status === 'failed' || t.status === 'canceled').length
+    return {
+      count: all.length,
+      activeCount: active.length,
+      pendingCount: all.length - active.length,
+      loaded,
+      total,
+      speed,
+      finished,
+      etaMs: total > loaded && speed > 0 ? ((total - loaded) / speed) * 1000 : 0,
+      // 有任何一个任务拿不到总大小 → 总体也不给百分比（别用假的 0%）
+      pct: total ? Math.round((loaded / total) * 100) : null
+    }
   }
 
   function renderCurrentCard() {
@@ -2189,12 +2375,19 @@ export async function activate(ctx) {
             : h('button', { class: 'sd-btn sd-btn-sm', 'data-action': 'remove', onClick: () => removeTask(task) }, '移除')
         ])
       ]),
-      h('div', { class: 'sd-bar' }, h('div', { class: 'sd-bar-fill', style: { width: pct + '%' } })),
+      h(
+        'div',
+        { class: 'sd-bar' + (pct === null && active ? ' sd-bar-unknown' : '') },
+        pct === null && active
+          ? h('div', { class: 'sd-bar-fill sd-bar-fill-unknown' }) // 总大小未知：不确定进度条，别显示假的 0%
+          : h('div', { class: 'sd-bar-fill', style: { width: (pct === null ? (task.status === 'done' ? 100 : 0) : pct) + '%' } })
+      ),
       h('div', { class: 'sd-task-foot' }, [
         h(
           'span',
           { class: 'sd-muted' },
-          (task.total ? formatBytes(task.loaded) + ' / ' + formatBytes(task.total) : task.loaded ? formatBytes(task.loaded) : '大小未知') +
+          taskSizeText(task) +
+            (pct !== null && active ? ' · ' + pct + '%' : '') +
             (task.status === 'downloading' && task.speed > 0 ? ' · ' + formatSpeed(task.speed) : '') +
             (task.status === 'done' ? ' · ' + formatBytes(task.bytes) + (task.viaChunked ? ' · 分片' : '') : '')
         ),
@@ -2306,12 +2499,30 @@ export async function activate(ctx) {
           ]),
           overall.count
             ? h('div', { class: 'sd-card sd-progress-card', 'data-role': 'top-progress' }, [
-                h('div', { class: 'sd-bar' }, h('div', { class: 'sd-bar-fill', style: { width: overall.pct + '%' } })),
                 h(
-                  'span',
-                  { class: 'sd-muted' },
-                  '正在下载 ' + overall.count + ' 个任务 · ' + formatBytes(overall.loaded) + (overall.total ? ' / ' + formatBytes(overall.total) : '') + ' · ' + overall.pct + '%'
-                )
+                  'div',
+                  { class: 'sd-bar' + (overall.pct === null ? ' sd-bar-unknown' : '') },
+                  overall.pct === null
+                    ? h('div', { class: 'sd-bar-fill sd-bar-fill-unknown' })
+                    : h('div', { class: 'sd-bar-fill', style: { width: overall.pct + '%' } })
+                ),
+                h('div', { class: 'sd-foot-row' }, [
+                  h(
+                    'span',
+                    { class: 'sd-muted', 'data-role': 'overall-text' },
+                    '正在下载 ' + overall.count + ' 个任务' +
+                      (overall.pendingCount ? '（' + overall.pendingCount + ' 个排队）' : '') +
+                      ' · ' + formatBytes(overall.loaded) +
+                      (overall.total ? ' / ' + formatBytes(overall.total) : '') +
+                      (overall.pct === null ? '' : ' · ' + overall.pct + '%')
+                  ),
+                  h(
+                    'span',
+                    { class: 'sd-muted' },
+                    (overall.speed > 0 ? formatSpeed(overall.speed) + ' / 秒' : '') +
+                      (overall.etaMs > 0 ? (overall.speed > 0 ? ' · ' : '') + '剩余约 ' + formatSeconds(overall.etaMs) : '')
+                  )
+                ])
               ])
             : null,
           state.notice ? h('div', { class: 'sd-notice', 'data-role': 'notice' }, state.notice) : null,
@@ -3348,8 +3559,15 @@ export async function activate(ctx) {
     ensureBarButtons,
     applyTaskCenter,
     syncCenterTask,
+    syncCenterGroup,
     centerHandles,
-    centerLabel
+    centerGroups,
+    centerLabel,
+    taskProgress,
+    taskEtaMs,
+    taskSizeText,
+    pushSpeedSample,
+    taskTimeText
   }
 }
 

@@ -864,6 +864,12 @@ function propOf(tree, prop, value, read) {
   return n ? n.props[read] : undefined
 }
 
+/** 取某个任务行里的全部文案（按 data-task 定位） */
+function rowText(tree, taskId) {
+  const node = findByProp(tree, 'data-task', taskId)
+  return node ? textOf(node) : ''
+}
+
 /** 按 data-group + data-value 找选项 chip（音质 / 保存位置） */
 function findOption(tree, group, value) {
   return walk(tree).find((n) => n.props && n.props['data-group'] === group && n.props['data-value'] === value) || null
@@ -1966,7 +1972,8 @@ async function main() {
   includes(def0.id, 'song-downloader:', 'id 用 <插件id>:<任务id>')
   eq(def0.name, '花落叹 · 涂一乐', '标题是「歌名 · 歌手」')
   eq(def0.status, 'pending', '入队时状态 = pending（宿主显示「待操作」）')
-  eq(typeof def0.progress.percent, 'number', '带百分比（面板画进度条用）')
+  eq(def0.progress.percent, undefined, '排队阶段还没拿到总大小 → 不给百分比（不画假的 0% 进度条）')
+  eq(typeof def0.progress.label, 'string', '有状态文案')
   eq(def0.progress.label, '排队中', 'label 显示排队中')
   eq(Array.isArray(def0.actions), true, '带操作按钮')
   eq(def0.actions.some((a) => a.id === 'cancel'), true, '运行中给「停止」')
@@ -2158,6 +2165,129 @@ async function main() {
   eq(noResolver.source, 'api', '降级到自己请求')
   first.records.playerState.resolveAudioUrl = savedResolve
   first.records.resolveResult = null
+
+  /* -------------------------------------------------- 31. 进度显示 */
+  section('31. 进度显示：不确定进度条 / 平滑速度 / 剩余时间 / 批量总进度')
+  // ① 总大小未知时给 null（而不是 0）——否则整段显示 0% 像卡死
+  eq(apiOut.taskProgress({ status: 'downloading', loaded: 1024, total: 0 }), null, '总大小未知 → 百分比为 null')
+  eq(apiOut.taskProgress({ status: 'downloading', loaded: 512, total: 1024 }), 50, '一半 → 50%')
+  eq(apiOut.taskProgress({ status: 'done', loaded: 1024, total: 0 }), 100, '完成就是 100%')
+  eq(apiOut.taskSizeText({ status: 'downloading', loaded: 2048, total: 0 }), '已下载 2.0 KB', '总大小未知时只说已下载')
+  eq(apiOut.taskSizeText({ status: 'pending', loaded: 0, total: 0 }), '大小未知', '还没开始时写「大小未知」')
+  eq(apiOut.taskSizeText({ status: 'downloading', loaded: 1024, total: 2048 }), '1.0 KB / 2.0 KB', '有总大小时给比例')
+
+  // ② 剩余时间：拿不到总大小或速度为 0 一律不给
+  eq(apiOut.taskEtaMs({ total: 0, loaded: 100, speed: 1000 }), 0, '总大小未知 → 不给剩余时间')
+  eq(apiOut.taskEtaMs({ total: 1000, loaded: 1000, speed: 1000 }), 0, '已经下完 → 不给')
+  eq(apiOut.taskEtaMs({ total: 3000, loaded: 1000, speed: 1000 }), 2000, '剩 2000 字节 / 1000 B/s = 2000ms')
+
+  // ③ 速度用滑动窗口，不被单次抖动带偏（注入时间戳，样本可控）
+  const samples = []
+  eq(apiOut.pushSpeedSample(samples, 0, 1000), 0, '只有一个样本时速度为 0')
+  eq(apiOut.pushSpeedSample(samples, 1000, 1500) > 0, true, '两个样本就能给出速度')
+  eq(apiOut.pushSpeedSample(samples, 2000, 2000) > 0, true, '继续累积')
+  // 抖动的单点不该把显示值带飞：窗口平均 != 最后一次瞬时值，且落在两端之间
+  const burst = []
+  apiOut.pushSpeedSample(burst, 0, 0)
+  apiOut.pushSpeedSample(burst, 1000000, 1000) // 第一秒 1 MB/s
+  apiOut.pushSpeedSample(burst, 1001000, 2000) // 第二秒只有 1 KB/s（抖了）
+  const shown = apiOut.pushSpeedSample(burst, 3001000, 3000) // 最后一步瞬时 2 MB/s
+  ok(shown > 0 && shown !== 2000000, '窗口平均与最后一次瞬时值不同（有平滑）', { shown })
+  ok(shown < 2000000 && shown > 1000, '窗口值落在两个极端之间', { shown })
+  // 超过窗口的老样本会被丢掉
+  const long = []
+  apiOut.pushSpeedSample(long, 0, 0)
+  apiOut.pushSpeedSample(long, 1024000, 1000)
+  apiOut.pushSpeedSample(long, 1024000, 9000)
+  ok(long.length <= 3, '老样本会被清掉（只留窗口内的）', { len: long.length })
+
+  // ④ 插件页：总大小未知时画「不确定进度条」，且不显示假百分比
+  //    （关掉「分片下载」后只能一次性下载：整个下载过程中都算不出百分比）
+  apiOut.state.settings.confirmBeforeDownload = false
+  apiOut.state.settings.preferHostUrl = false
+  first.records.currentTrack.value = FLAC_TRACK
+  api.handler = null
+  net.failPattern = null
+  net.calls.length = 0
+  net.mode = 'range'
+  net.file = makeBytes(2 * 1024 * 1024, 79)
+  apiOut.state.settings.chunked = false
+  let midProgressTask = null
+  const midHolder = { seen: null }
+  net.beforeChunk = async () => {
+    // 一次性下载只有一次请求：此刻任务在跑，但总大小/已下载都还是 0
+    if (midHolder.seen || !midProgressTask || midProgressTask.status !== 'downloading') return
+    const t = renderOf(page)
+    midHolder.seen = {
+      status: midProgressTask.status,
+      pct: apiOut.taskProgress(midProgressTask),
+      loaded: midProgressTask.loaded,
+      total: midProgressTask.total
+    }
+    midHolder.rendered = walk(t).some(
+      (n) => n.props && typeof n.props.class === 'string' && n.props.class.includes('sd-bar-fill-unknown')
+    )
+    midHolder.rowText = rowText(t, midProgressTask.id)
+  }
+  const midDownload = (await apiOut.startDownloads([FLAC_TRACK], 'auto'))[0]
+  midProgressTask = midDownload
+  await waitFor(() => midDownload.status === 'done' || midDownload.status === 'failed', '未知总大小任务收敛')
+  net.beforeChunk = null
+  apiOut.state.settings.chunked = true
+  eq(midDownload.status, 'done', '一次性下载也能下完')
+  ok(midHolder.seen && midHolder.seen.pct === null, '拿不到总大小时百分比是 null', midHolder.seen || {})
+  eq(midHolder.rendered, true, '下载中渲染出不确定进度条（不是卡在 0% 的实心条）')
+  includes(midHolder.rowText || '', '大小未知', '任务行文案是「大小未知」而不是 0%')
+  eq(String(midHolder.rowText || '').includes('%'), false, '任务行不显示假的百分比')
+  tree = renderOf(page)
+  eq(
+    walk(tree).some((n) => n.props && typeof n.props.class === 'string' && n.props.class.includes('sd-bar-fill-unknown')),
+    false,
+    '任务结束后不再画不确定进度条'
+  )
+
+  // ⑤ 批量下载：任务中心用一个父条目 + 每首一行 items
+  const batchCtx = makeCtx({ storage: new Map(), currentTrack: FLAC_TRACK })
+  const batchApi = await mod.activate(batchCtx.ctx)
+  batchApi.state.settings.confirmBeforeDownload = false
+  batchApi.state.settings.preferHostUrl = false
+  net.mode = 'range'
+  net.file = makeBytes(300 * 1024, 89)
+  batchCtx.records.taskDefs.length = 0
+  const batchTasks = await batchApi.startDownloads([FLAC_TRACK, LOW_TRACK], 'auto')
+  eq(batchTasks.length, 2, '起了 2 首')
+  // 总体进度卡：排队中的任务也要算进去（否则进度条会在两首之间跳回 0%）
+  const batchTree = renderOf(batchCtx.records.pages[0].component)
+  const overallNode = findByProp(batchTree, 'data-role', 'overall-text')
+  ok(!!overallNode, '渲染了总体进度行')
+  const overallText = overallNode ? String(overallNode.children) : ''
+  includes(overallText, '2 个任务', '总体进度按任务数统计')
+  includes(overallText, '排队', '排队中的任务也计入（进度条不会跳回 0%）')
+  eq(!!batchTasks[0].group && batchTasks[0].group === batchTasks[1].group, true, '两首打同一个分组')
+  eq(batchCtx.records.taskDefs.length, 1, '任务中心只注册一个父条目（不再逐首占行）')
+  const groupDef = batchCtx.records.taskDefs[0]
+  eq(groupDef.name, '批量下载 · 2 首', '父条目名字带总首数')
+  eq(typeof groupDef.progress.percent, 'number', '父条目有总体百分比')
+  eq(groupDef.progress.label.includes('已完成 0/2'), true, '标签给出「已完成 x/y」')
+  eq(groupDef.items.length, 2, '两首歌各一行 items')
+  eq(groupDef.items[0].name.includes('花落叹'), true, 'items 里是歌名')
+  eq(typeof groupDef.items[0].statusLabel, 'string', 'items 有状态标签')
+  eq(groupDef.actions.some((a) => a.id === 'cancel-all'), true, '父条目给「全部停止」')
+
+  await waitFor(() => batchTasks.every((t) => t.status === 'done' || t.status === 'failed'), '批量任务收敛')
+  const groupHandle = batchCtx.records.taskHandles[0]
+  eq(groupHandle.calls.finish.length, 1, '全部结束后父条目 finish 一次')
+  eq(groupHandle.calls.finish[0].status, 'completed', '两首都成功 → completed')
+  eq(groupHandle.calls.finish[0].patch.progress.percent, 100, '父条目最终 100%')
+  eq(groupHandle.calls.finish[0].patch.items.every((it) => it.statusLabel.includes('已完成')), true, 'items 全部显示已完成')
+  const midPct = groupHandle.calls.update.concat(groupHandle.calls.start).map((p) => p.progress && p.progress.percent)
+  ok(midPct.some((v) => typeof v === 'number' && v > 0 && v < 100), '过程中有中间百分比（不是 0→100 跳变）', { midPct })
+
+  // 移除父条目里的歌 → 还剩歌时父条目保留；全清空 → 父条目消失
+  batchApi.removeTask(batchTasks[0])
+  eq(batchCtx.records.taskHandles[0].calls.dismiss, 0, '还剩一首时父条目保留')
+  batchApi.removeTask(batchTasks[1])
+  eq(batchCtx.records.taskHandles[0].calls.dismiss, 1, '歌都被移除后父条目也被摘掉')
 
   /* -------------------------------------------------- 25. dispose 回收 */
   section('25. dispose 回收在跑的任务与全局监听')
