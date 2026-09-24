@@ -1,6 +1,6 @@
 # 歌曲下载（`song-downloader`）
 
-> 当前版本 **1.2.0** · 需要 EchoMusic **≥ 2.3.2-beta.2**（本地接口通道）
+> 当前版本 **1.3.0** · 需要 EchoMusic **≥ 2.3.2-beta.2**（本地接口通道）
 
 把「当前播放」或「播放队列」里的歌下载到本地：下载前弹确认框选音质 / 保存位置 / 文件名，
 播放栏与标题栏都有**一键下载**按钮，分片下载带**真实进度与速度**，支持批量任务、失败重试与直链复制。
@@ -35,6 +35,7 @@
 
 | 功能 | 说明 |
 | --- | --- |
+| **任务中心** | 每个下载任务在标题栏「任务中心」占一行，带**进度条与百分比**（`下载中 62% · 12.4 MB / 32.1 MB · 1.8 MB/s`），可直接在那里**停止 / 重试 / 复制直链**；完成后 8 秒自动收起，失败会留着等你处理 |
 | **下载确认框** | 每次下载前弹窗确认：音质 / 保存位置 / 文件名模板 / 分片与提示开关，可勾「记住这些选项」写回设置，也可在设置里整体关掉 |
 | **播放栏按钮** | 播放栏右侧（收藏 / 播放队列那排）插一个下载图标；没歌在播时自动置灰；设置里可关 |
 | **标题栏按钮 / 命令** | 标题栏一个「下载」按钮，外加 3 条命令（下载当前 / 另存为 / 停止全部） |
@@ -181,6 +182,7 @@ function Pf(hash, quality, ppageId) { return Q.get('/song/url', { params: { hash
 | --- | --- | --- |
 | 下载前弹确认框 | **开** | 关掉后所有下载入口都用下面的默认设置直接开始，不再弹窗 |
 | **复用宿主已解析的播放地址** | **开** | 正在播放的那首歌直接用播放器已解析好的地址（音质跟随播放音质）：不发请求，也就不会触发风控。关掉则一律自己请求上游 |
+| **同步到标题栏「任务中心」** | **开** | 每个下载任务在任务中心占一行（进度条 + 百分比 + 停止/重试/复制直链）；完成后 8 秒自动收起，失败留着 |
 | 默认音质 | 自动（最优可用） | 可固定为 128K / 320K / FLAC / Hi-Res / 母带；不可用时仍会降级 |
 | 保存方式 | 直接下载到系统下载目录 | 或「弹窗询问保存位置（单曲）」；只在关掉确认框后生效 |
 | 文件名模板 | `{artist} - {name}` | 支持 `{artist} {name} {album} {quality} {ext} {time}`；非法字符自动清洗 |
@@ -261,6 +263,37 @@ ctx.ui.mount(host, PlayerBarButton)   // 默认 append 成子节点；{position:
 另外用「代际令牌」处理用户中途关弹窗：每次开/关 `dlgGen += 1`，解析或对话框 await 之后比对，
 不一致就作废（顺带把刚建出来的空文件删掉），避免「界面已关、文件却下下来了」。
 
+### 5.5 下载任务同步到标题栏「任务中心」
+
+宿主有**正式接口**，不需要 DOM 注入（asar 核验；宿主自己的「任务中心」标题栏项也是同一套）：
+
+```js
+const handle = ctx.tasks.register({
+  id: 'song-downloader:<taskId>', // ⚠️ 不能用 echo: 前缀（宿主保留给内置任务，会抛错）
+  name: '花落叹 · 涂一乐',
+  status: 'pending',              // pending(待操作) running(进行中) completed(已完成) error(失败) aborted(已中止)
+  progress: { percent: 42, label: '下载中 62% · 12.4 MB / 32.1 MB · 1.8 MB/s' },
+  actions: [{ id: 'cancel', label: '停止', variant: 'ghost', onClick: () => cancelTask(task) }],
+  retention: {                    // ⚠️ **必填**
+    completed: { mode: 'auto', delayMs: 8000 }, // 完成后 8 秒自动收起（看得见结果，又不堆屏）
+    error: { mode: 'manual' },                  // 失败常驻，等用户处理
+    aborted: { mode: 'auto', delayMs: 3000 }
+  }
+})
+// handle: { active, signal, cancel(), start(patch), update(patch), finish(status, patch), dismiss() }
+```
+
+三条踩过的坑：
+
+- **`retention` 漏了会直接抛**：宿主在建条目时校验，报 `TypeError: 任务 completed 保留策略无效`；
+- **收尾必须 `finish(status)`**，不能用 `update({status})` —— 只有 `finish` 才会排「自动收起」定时器，
+  也才会在 `aborted` 时 abort 掉 `handle.signal`；
+- **`start()` 只能从 `pending` 进 `running`**，所以同步要记 phase（本插件用 `taskId → { handle, phase }`），
+  并把同步挂在状态变更的**唯一出口** `patch()` 上；移除任务 / 清空已完成 / 关开关 / 插件卸载都要 `dismiss()`，
+  否则任务中心会留一堆幽灵行。
+
+宿主没有 `ctx.tasks`（老版本）时静默降级：下载照常，只是不显示在任务中心。
+
 ## 六、排障
 
 | 现象 | 原因 / 处理 |
@@ -280,8 +313,8 @@ ctx.ui.mount(host, PlayerBarButton)   // 默认 append 成子节点；{position:
 ## 七、测试
 
 ```
-tests/song-downloader.smoke.mjs    无头集成测试（真实 Vue 3 ESM + mock ctx + 假 CDN）318/318 通过
-tests/song-downloader.mutate.mjs   变异测试（把关键行为改回 bug，确认断言有效）      34/34 被抓到
+tests/song-downloader.smoke.mjs    无头集成测试（真实 Vue 3 ESM + mock ctx + 假 CDN）354/354 通过
+tests/song-downloader.mutate.mjs   变异测试（把关键行为改回 bug，确认断言有效）      43/43 被抓到
 ```
 
 ```powershell
@@ -301,6 +334,9 @@ $node = "$env:USERPROFILE\.workbuddy\binaries\node\versions\22.22.2-3\node.exe"
   「记住」写回设置、取消/Esc/Ctrl+Enter/点遮罩四条关闭路径、批量时「选择位置」禁用、云盘歌不弹框；
 - **安全验证**：判定规则（成功响应里的 ssaCode 不算）、唤起验证→重试成功、
   取消后明确失败并标记 `needsVerify`、同一轮只弹一次、宿主没能力时的文案；
+- **任务中心**：id 前缀与 retention 形态（漏了真机会抛）、pending→start→update→finish 的状态机推进、
+  进度百分比递增、完成后换成「复制直链」、失败给「重试」并带错误文案、中止走 aborted、
+  移除/清空/关开关时摘掉条目、老宿主没有 `ctx.tasks` 时静默降级；
 - **复用宿主地址**：当前曲目 0 次上游请求、关掉开关后回退到接口、要更高音质时不偷懒、
   宿主地址失效自动回退 `/song/url`、上游风控失败时用曲目上残留地址救回、确认框里的提示；
 - **0 KB 空文件**：另存为与确认框两条路径在解析失败时都**不弹保存对话框**、
@@ -313,8 +349,9 @@ $node = "$env:USERPROFILE\.workbuddy\binaries\node\versions\22.22.2-3\node.exe"
 变异测试逐个把关键行为改回 bug（音质不降级、不传 `maxResponseBytes: 0`、丢 `<a download>`、
 不清洗文件名、`createTask` 返回原始对象、确认框被绕过、Esc 不关、播放栏不去重/不补挂/不卸载、
 设置根节点又变回自带滚动、不做安全验证兜底、每档音质都弹验证、先弹保存对话框再解析、
-失败不清理空文件、不复用宿主地址、丢 `audioUrl`、宿主地址失效不回退……），34 个全部被测试抓到。
-样式类变异通过 `SD_CSS_ENTRY` 指向副本实现，不需要改仓库里的真文件。
+失败不清理空文件、不复用宿主地址、丢 `audioUrl`、宿主地址失效不回退、
+漏 `retention`、跳过 `start()`、用 `update` 收尾、任务 id 用 `echo:`、不摘幽灵行……），
+43 个全部被测试抓到。样式类变异通过 `SD_CSS_ENTRY` 指向副本实现，不需要改仓库里的真文件。
 
 ## 八、边界
 
@@ -325,6 +362,12 @@ $node = "$env:USERPROFILE\.workbuddy\binaries\node\versions\22.22.2-3\node.exe"
   拿不到高音质就降级，拿不到就报错，插件不做任何尝试绕过。
 
 ## 九、变更日志
+
+### 1.3.0
+- 新：**下载任务与进度同步到标题栏「任务中心」**（`ctx.tasks.register`，不是 DOM 注入）。
+  每个任务一行，带进度条 / 百分比 / 大小 / 速度，以及对应操作：运行中「停止」、失败「重试」、完成「复制直链」。
+  完成后 8 秒自动收起（批量下载不会堆屏），失败常驻等处理；设置里可整体关掉。
+  宿主没有 `ctx.tasks` 时静默降级（下载照常，只是不显示）。
 
 ### 1.2.0
 - 新：**正在播放的那首歌直接复用宿主已解析好的播放地址**（player store 的 `currentAudioUrl` /

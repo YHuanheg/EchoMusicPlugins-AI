@@ -250,6 +250,69 @@ const MUTANTS = [
     name: '上游全部失败时不用残留的宿主地址兜底',
     from: `  if (host.urls.length && !host.current) {`,
     to: `  if (false) {`
+  },
+  {
+    name: '下载任务不同步到任务中心（标题栏看不到进度）',
+    from: `    if (!task || !centerEnabled || !hasTasksApi()) return`,
+    to: `    if (true) return`
+  },
+  {
+    name: '注册任务条目时漏掉 retention（真机上宿主会直接抛「保留策略无效」）',
+    from: `          retention: {
+            completed: { mode: 'auto', delayMs: 8000 },
+            error: { mode: 'manual' },
+            aborted: { mode: 'auto', delayMs: 3000 }
+          }`,
+    to: `          retention: undefined`
+  },
+  {
+    name: '任务 id 占用宿主保留前缀 echo:',
+    from: `          id: PLUGIN_ID + ':' + task.id,`,
+    to: `          id: 'echo:' + task.id,`
+  },
+  {
+    name: '进度百分比恒为 0（面板进度条不动）',
+    from: `      progress: { percent: taskProgress(task), label: centerLabel(task) },`,
+    to: `      progress: { percent: 0, label: centerLabel(task) },`
+  },
+  {
+    name: '完成态映射错（面板永远显示「进行中」）',
+    from: `    if (task.status === 'done') return 'completed'`,
+    to: `    if (task.status === 'done') return 'running'`
+  },
+  {
+    name: '运行期不用 start()（宿主只允许 pending→running，条目会卡在「待操作」）',
+    from: `        if (rec.handle.start(info)) rec.phase = 'running'
+        else rec.handle.update(info)
+        return`,
+    to: `        rec.phase = 'running'
+        return`
+  },
+  {
+    name: '收尾用 update 而不是 finish（中止态不会自动收起，状态机也不对）',
+    from: `      if (terminal) {
+        rec.handle.finish(info.status, info)
+        rec.phase = 'terminal'
+        return
+      }`,
+    to: `      if (terminal) {
+        rec.handle.update(info)
+        rec.phase = 'terminal'
+        return
+      }`
+  },
+  {
+    name: '移除本地任务时不摘面板条目（任务中心留一堆幽灵行）',
+    from: `    if (idx >= 0) state.tasks.splice(idx, 1)
+    dismissCenterTask(task.id)`,
+    to: `    if (idx >= 0) state.tasks.splice(idx, 1)`
+  },
+  {
+    name: '关掉任务中心开关时不清场（旧条目留一辈子）',
+    from: `    if (!centerEnabled) {
+      dismissAllCenterTasks()`,
+    to: `    if (!centerEnabled) {
+      void 0`
   }
 ]
 

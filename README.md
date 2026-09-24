@@ -263,7 +263,7 @@ tests/tag-filter.mutate.mjs   变异测试（把关键行为改回 bug，确认�
 
 # 歌曲下载（`song-downloader`）
 
-> 当前版本 **1.2.0** · 需要 EchoMusic **≥ 2.3.2-beta.2**
+> 当前版本 **1.3.0** · 需要 EchoMusic **≥ 2.3.2-beta.2**
 
 把「当前播放」或「播放队列」里的歌下载到本地：**正在播放的那首直接复用宿主已解析好的播放地址**
 （0 次上游请求、不触发风控），**下载前弹确认框**选音质 / 保存位置 / 文件名，
@@ -293,11 +293,12 @@ tests/tag-filter.mutate.mjs   变异测试（把关键行为改回 bug，确认�
 | 设置根节点**不能**自带 `height:100%` + `overflow-y:auto` | 插件页（`.plugin-page-host`，有确定高度）该由插件自己滚；而插件设置渲染在宿主的弹窗滚动容器（`.dialog-scroll-area`）里，该由**宿主**滚。写错就变成「自己高度=内容高度 → 谁都滚不了」（1.0.0 的真实 bug，已加 CSS 契约测试锁死） |
 | 风控（「本次请求需要验证」）**必须插件自己接** | 宿主不会替插件兜底：要把 `ssaCode` 拿去 `ctx.kugouVerification.request()` 唤起安全验证弹窗，通过后原样重试一次；同一轮只弹一次，否则逐档音质会连弹三次 |
 | **风控账号下最稳的路：复用宿主已解析的地址** | 宿主播放器走 `Q.get('/song/url')`（自带验证兜底），插件 IPC 通道没有兜底。既然宿主已经把当前曲目解好了，直接读 `ctx.stores.player.currentAudioUrl` 下载：不发请求、不碰风控，而且就是播放器正在用的那条地址 |
+| 任务进度要进「任务中心」就走 `ctx.tasks.register`，**别做 DOM 注入** | 宿主给插件开了正式接口（标题栏面板 id `tasks`），面板读 `progress.percent` 画进度条、`progress.label` 显示文案、`actions` 给按钮。两个硬约束：**`retention` 必填**（漏了 register 直接抛），**收尾必须 `finish(status)`**（只有它排自动收起定时器 + abort signal） |
 | 「选择位置」必须**先解析、再弹保存对话框** | `showSaveFilePicker()` 一确认就先建出 0 字节文件；顺序反了，解析失败（风控/无版权）就会在磁盘上留一堆 0 KB 残骸（1.1.0 的真实反馈，1.1.1 修） |
 
 ```
-tests/song-downloader.smoke.mjs    无头集成测试（真实 Vue 3 ESM + mock ctx + 真实 Range 语义的假 CDN）318/318 通过
-tests/song-downloader.mutate.mjs   变异测试（把关键行为改回 bug，确认断言有效）                      34/34 被抓到
+tests/song-downloader.smoke.mjs    无头集成测试（真实 Vue 3 ESM + mock ctx + 真实 Range 语义的假 CDN）354/354 通过
+tests/song-downloader.mutate.mjs   变异测试（把关键行为改回 bug，确认断言有效）                      43/43 被抓到
 ```
 
 测试里假 CDN **真实实现 Range 语义**，所以能断言「拼装后的字节与源文件逐字节一致」；

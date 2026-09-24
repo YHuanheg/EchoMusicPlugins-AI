@@ -100,6 +100,7 @@ const DEFAULT_SETTINGS = {
   saveMode: 'direct', // direct（系统下载目录）| ask（单曲弹另存为对话框）
   confirmBeforeDownload: true, // 下载前弹确认框（可改音质/保存位置/文件名）
   preferHostUrl: true, // 当前播放的歌直接复用宿主已解析的播放地址（最稳，避开风控）
+  taskCenter: true, // 把下载任务同步到标题栏「任务中心」（含进度条与停止/重试）
   fileNameTemplate: '{artist} - {name}',
   chunked: true, // Range 分片下载（能显示真实进度与速度）
   chunkSizeMb: 1,
@@ -1073,6 +1074,7 @@ export async function activate(ctx) {
     out.chunked = !!out.chunked
     out.confirmBeforeDownload = !!out.confirmBeforeDownload
     out.preferHostUrl = !!out.preferHostUrl
+    out.taskCenter = !!out.taskCenter
     out.toastOnDone = !!out.toastOnDone
     out.sidebarEntry = !!out.sidebarEntry
     out.toolbarEntry = !!out.toolbarEntry
@@ -1123,6 +1125,7 @@ export async function activate(ctx) {
   let runningCount = 0
   let taskSeq = 0
   let heartbeat = null
+  let centerEnabled = false // 任务中心同步开关（真的生效还要看宿主有没有 ctx.tasks）
 
   function setSetting(key, value) {
     if (!(key in DEFAULT_SETTINGS)) return
@@ -1130,6 +1133,7 @@ export async function activate(ctx) {
     if (key === 'sidebarEntry') applySidebarEntry(!!value)
     if (key === 'toolbarEntry') applyToolbarEntry(!!value)
     if (key === 'playerBarButton') applyPlayerBarButton(!!value)
+    if (key === 'taskCenter') applyTaskCenter(!!value)
     void writeStorage(KEY_SETTINGS, { ...state.settings })
   }
 
@@ -1195,6 +1199,154 @@ export async function activate(ctx) {
   function patch(task, fields) {
     if (!task) return
     Object.assign(task, fields)
+    syncCenterTask(task)
+  }
+
+  /* ---------------- 标题栏「任务中心」同步 ----------------
+   * 宿主的任务中心是标题栏里的一个面板，并且**给插件开了正式接口**（asar 核验）：
+   *   const handle = ctx.tasks.register({ id, name, status, progress:{percent,label},
+   *                                       items, actions:[{id,label,variant,onClick}], error, retention })
+   *   handle → { active, signal, cancel(), start(patch), update(patch), finish(status, patch), dismiss() }
+   * 状态：pending(待操作) / running(进行中) / completed(已完成) / error(失败) / aborted(已中止)
+   * ⚠️ `retention` 是**必填**：漏了宿主会在建条目时直接抛「任务 X 保留策略无效」
+   *    （'transient' / 'action-required' / 每个终止态各写 {mode,delayMs}）。
+   * ⚠️ id 不能以 `echo:` 开头（宿主保留给内置任务），所以用 `<插件id>:<任务id>`。
+   */
+
+  const centerHandles = new Map() // taskId → { handle, phase: 'pending'|'running'|'terminal' }
+
+  function hasTasksApi() {
+    return !!(ctx.tasks && typeof ctx.tasks.register === 'function')
+  }
+
+  function centerStatusOf(task) {
+    if (task.status === 'done') return 'completed'
+    if (task.status === 'failed') return 'error'
+    if (task.status === 'canceled') return 'aborted'
+    if (task.status === 'pending') return 'pending'
+    return 'running'
+  }
+
+  function centerLabel(task) {
+    const pct = taskProgress(task)
+    if (task.status === 'pending') return '排队中'
+    if (task.status === 'resolving') return '解析播放地址…'
+    if (task.status === 'downloading') {
+      const size = task.total ? formatBytes(task.loaded) + ' / ' + formatBytes(task.total) : task.loaded ? formatBytes(task.loaded) : '大小未知'
+      return '下载中 ' + pct + '% · ' + size + (task.speed > 0 ? ' · ' + formatSpeed(task.speed) : '')
+    }
+    if (task.status === 'saving') return '写入文件…'
+    if (task.status === 'done') {
+      return '已完成 · ' + formatBytes(task.bytes) + (task.actualQuality ? ' · ' + (QUALITY_LABEL[task.actualQuality] || task.actualQuality) : '')
+    }
+    if (task.status === 'canceled') return '已取消'
+    return '失败'
+  }
+
+  function centerActions(task) {
+    const list = []
+    const active = task.status === 'pending' || task.status === 'resolving' || task.status === 'downloading' || task.status === 'saving'
+    if (active) {
+      list.push({ id: 'cancel', label: '停止', variant: 'ghost', onClick: () => cancelTask(task) })
+    } else if (task.status === 'failed') {
+      list.push({ id: 'retry', label: '重试', variant: 'primary', onClick: () => retryTask(task) })
+    } else if (task.status === 'done' && task.directUrl) {
+      list.push({ id: 'copy', label: '复制直链', variant: 'ghost', onClick: () => void copyText(task.directUrl, log) })
+    }
+    return list
+  }
+
+  function centerPatch(task) {
+    const patch = {
+      name: task.name + (task.artist ? ' · ' + task.artist : ''),
+      status: centerStatusOf(task),
+      progress: { percent: taskProgress(task), label: centerLabel(task) },
+      actions: centerActions(task)
+    }
+    if (task.status === 'failed') patch.error = task.error
+    return patch
+  }
+
+  /** 把任务状态同步到任务中心；用 patch() 作为唯一入口，所以任何状态变化都会走到这里 */
+  function syncCenterTask(task) {
+    if (!task || !centerEnabled || !hasTasksApi()) return
+    const info = centerPatch(task)
+    const terminal = info.status === 'completed' || info.status === 'error' || info.status === 'aborted'
+    let rec = centerHandles.get(task.id)
+    // 终止态只同步一次（finish 之后再 update 没意义，而且 aborted 的自动消失定时器只在 finish 里排）
+    if (rec && rec.phase === 'terminal') return
+    if (!rec || !rec.handle || !rec.handle.active) {
+      // 重试 / 状态回退时：同 id 重新 register 会替换旧条目，所以先摘掉旧的
+      if (rec) dismissCenterTask(task.id)
+      let handle = null
+      try {
+        handle = ctx.tasks.register({
+          id: PLUGIN_ID + ':' + task.id,
+          ...info,
+          // 完成 8 秒后自动消失（够看清结果，又不会在批量下载后堆一屏）；失败常驻等处理；中止 3 秒后消失
+          retention: {
+            completed: { mode: 'auto', delayMs: 8000 },
+            error: { mode: 'manual' },
+            aborted: { mode: 'auto', delayMs: 3000 }
+          }
+        })
+      } catch (e) {
+        log('注册任务中心条目失败', e)
+        return
+      }
+      rec = { handle, phase: terminal ? 'terminal' : info.status === 'pending' ? 'pending' : 'running' }
+      centerHandles.set(task.id, rec)
+      if (terminal) {
+        try {
+          rec.handle.finish(info.status, info)
+        } catch (e) {
+          log('任务中心收尾失败', e)
+        }
+      }
+      return
+    }
+    try {
+      if (terminal) {
+        rec.handle.finish(info.status, info)
+        rec.phase = 'terminal'
+        return
+      }
+      if (rec.phase === 'pending') {
+        // start() 只能从 pending 进入 running
+        if (rec.handle.start(info)) rec.phase = 'running'
+        else rec.handle.update(info)
+        return
+      }
+      rec.handle.update(info)
+    } catch (e) {
+      log('同步任务中心失败', e)
+    }
+  }
+
+  function dismissCenterTask(taskId) {
+    const rec = centerHandles.get(taskId)
+    if (!rec) return
+    centerHandles.delete(taskId)
+    try {
+      if (rec.handle && typeof rec.handle.dismiss === 'function') rec.handle.dismiss()
+    } catch {
+      /* 忽略 */
+    }
+  }
+
+  function dismissAllCenterTasks() {
+    for (const taskId of [...centerHandles.keys()]) dismissCenterTask(taskId)
+  }
+
+  /** 设置开关：关掉时把已有条目摘干净，打开时把当前任务补一遍 */
+  function applyTaskCenter(enabled) {
+    centerEnabled = !!enabled && hasTasksApi()
+    if (!centerEnabled) {
+      dismissAllCenterTasks()
+      if (enabled && !hasTasksApi()) log('宿主没有任务中心接口（ctx.tasks），跳过')
+      return
+    }
+    for (const task of state.tasks) syncCenterTask(task)
   }
 
   function pump() {
@@ -1473,6 +1625,7 @@ export async function activate(ctx) {
       }
     }
     if (created.length) {
+      for (const task of created) syncCenterTask(task) // 立刻在任务中心占一行（排队中）
       startHeartbeat()
       pump()
     }
@@ -1516,12 +1669,17 @@ export async function activate(ctx) {
     if (!task) return
     const idx = state.tasks.findIndex((x) => x.id === task.id)
     if (idx >= 0) state.tasks.splice(idx, 1)
+    dismissCenterTask(task.id)
   }
 
   function clearFinished() {
     for (let i = state.tasks.length - 1; i >= 0; i--) {
-      const s = state.tasks[i].status
-      if (s === 'done' || s === 'failed' || s === 'canceled') state.tasks.splice(i, 1)
+      const task = state.tasks[i]
+      const s = task.status
+      if (s === 'done' || s === 'failed' || s === 'canceled') {
+        state.tasks.splice(i, 1)
+        dismissCenterTask(task.id)
+      }
     }
   }
 
@@ -2152,6 +2310,11 @@ export async function activate(ctx) {
               'preferHostUrl',
               '复用宿主已解析的播放地址',
               '正在播放的那首歌直接用播放器已经解析好的地址（音质跟随播放音质）——不发请求，也就不会触发风控；其它曲子仍走接口'
+            ),
+            toggle(
+              'taskCenter',
+              '同步到标题栏「任务中心」',
+              '每个下载任务在任务中心占一行（带进度条与百分比），可以直接在那里停止 / 重试 / 复制直链；完成后 8 秒自动收起，失败会留着'
             ),
             select('quality', '默认音质', '「自动」= 该歌可用的最高音质；不可用时自动逐级降级', [
               ['auto', '自动（最优可用）'],
@@ -2893,6 +3056,7 @@ export async function activate(ctx) {
   }
 
   applyPlayerBarButton(state.settings.playerBarButton)
+  applyTaskCenter(state.settings.taskCenter)
 
   if (ctx.commands && typeof ctx.commands.register === 'function') {
     ctx.commands.register('download-current', () => void downloadCurrent(), { title: '下载当前播放的歌曲' })
@@ -2981,6 +3145,7 @@ export async function activate(ctx) {
       /* 忽略 */
     }
     applyPlayerBarButton(false)
+    dismissAllCenterTasks()
     closeDownloadDialog()
     log('已停用并回收资源')
   })
@@ -3014,7 +3179,11 @@ export async function activate(ctx) {
     currentTrack,
     readQueue,
     toNormalized,
-    ensureBarButton
+    ensureBarButton,
+    applyTaskCenter,
+    syncCenterTask,
+    centerHandles,
+    centerLabel
   }
 }
 

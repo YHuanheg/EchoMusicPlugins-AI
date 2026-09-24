@@ -534,6 +534,64 @@ const CLOUD_TRACK = {
 
 const NO_HASH_TRACK = { id: 'song-4', name: '没有hash的歌', artist: '某人' }
 
+/** 宿主「任务中心」的条目句柄（照抄真实语义：start 只能从 pending 进、finish 只写状态、dismiss 置为失效） */
+function makeTaskHandle(def, records) {
+  const calls = { start: [], update: [], finish: [], dismiss: 0 }
+  const handle = {
+    def,
+    calls,
+    active: true,
+    entry: { ...def, generation: ++records.taskGens },
+    start(patch) {
+      if (handle.entry.status !== 'pending') return false
+      calls.start.push(patch || {})
+      Object.assign(handle.entry, patch || {}, { status: 'running' })
+      return true
+    },
+    update(patch) {
+      if (!handle.active) return false
+      calls.update.push(patch || {})
+      Object.assign(handle.entry, patch || {})
+      return true
+    },
+    finish(status, patch) {
+      calls.finish.push({ status, patch: patch || {} })
+      Object.assign(handle.entry, patch || {}, { status })
+      return true
+    },
+    dismiss() {
+      calls.dismiss += 1
+      handle.active = false
+    },
+    cancel() {
+      handle.active = false
+      return true
+    }
+  }
+  return handle
+}
+
+/**
+ * 宿主的任务定义校验（与 asar 里的实现等价）：
+ * - id 不能为空、不能以 `echo:` 开头（保留给内置任务）
+ * - status 必须是那五个之一（否则宿主内部读 terminalPolicy[status] 会炸）
+ * - **retention 必填**：'transient' / 'action-required' / 每个终止态各写 {mode,delayMs}
+ * 把校验写进 mock 是有意的 —— 不然「漏了 retention」这种真机会直接抛错的 bug 测不出来。
+ */
+function validateTaskDef(def) {
+  if (!def || typeof def !== 'object') throw new TypeError('任务定义无效')
+  if (!def.id) throw new TypeError('任务 ID 不能为空')
+  if (String(def.id).startsWith('echo:')) throw new Error('插件不能注册保留任务 ID: ' + def.id)
+  if (!['pending', 'running', 'completed', 'error', 'aborted'].includes(def.status)) throw new TypeError('任务状态无效: ' + def.status)
+  const r = def.retention
+  if (r === 'transient' || r === 'action-required') return
+  for (const t of ['completed', 'error', 'aborted']) {
+    const v = r && r[t]
+    if (v && v.mode === 'manual') continue
+    if (!v || v.mode !== 'auto' || !Number.isFinite(v.delayMs) || v.delayMs < 0) throw new TypeError('任务 ' + t + ' 保留策略无效')
+  }
+}
+
 function makeCtx(options) {
   const o = options || {}
   const storage = o.storage || new Map()
@@ -551,6 +609,9 @@ function makeCtx(options) {
     observes: [],
     verifyCalls: [],
     verifyMode: 'ok',
+    taskDefs: [],
+    taskHandles: [],
+    taskGens: 0,
     sidebarDisposals: 0,
     toolbarDisposals: 0,
     disposers: []
@@ -688,6 +749,15 @@ function makeCtx(options) {
       }
     },
     electron: { platform: 'win32', api },
+    tasks: {
+      register(def) {
+        validateTaskDef(def)
+        const handle = makeTaskHandle(def, records)
+        records.taskDefs.push(def)
+        records.taskHandles.push(handle)
+        return handle
+      }
+    },
     kugouVerification: o.noVerifyApi
       ? undefined
       : {
@@ -1281,7 +1351,7 @@ async function main() {
   eq(findByProp(sTree, 'data-setting', 'chunked') !== null, true, '有分片开关')
   eq(findByProp(sTree, 'data-setting', 'quality') !== null, true, '有音质选项')
   eq(findByProp(sTree, 'data-setting', 'fileNameTemplate') !== null, true, '有文件名模板输入')
-  eq(countByProp(sTree, 'role', 'switch'), 8, '8 个开关（确认框/宿主地址/分片/完成提示/侧边栏/工具栏/播放栏/调试）')
+  eq(countByProp(sTree, 'role', 'switch'), 9, '9 个开关（确认框/宿主地址/任务中心/分片/完成提示/侧边栏/工具栏/播放栏/调试）')
 
   const chunkSwitch = findByProp(sTree, 'data-setting', 'chunked')
   const innerSwitch = walk(chunkSwitch).find((n) => n.props && n.props.role === 'switch')
@@ -1804,6 +1874,122 @@ async function main() {
   includes(textOf(dTree), '不会触发风控', '说明了这样做的原因')
   apiOut.closeDownloadDialog()
   first.records.resetPlayerState()
+
+  /* -------------------------------------------------- 29. 标题栏「任务中心」 */
+  section('29. 同步到标题栏任务中心（进度 / 操作 / 保留策略）')
+  await waitFor(() => apiOut.state.tasks.every((t) => t.status !== 'downloading' && t.status !== 'resolving' && t.status !== 'saving'), '先等任务收敛')
+  first.records.currentTrack.value = FLAC_TRACK
+  first.records.resetPlayerState()
+  apiOut.state.settings.confirmBeforeDownload = false
+  apiOut.state.settings.preferHostUrl = false
+  apiOut.state.settings.quality = 'auto'
+  api.handler = null
+  net.mode = 'range'
+  net.failPattern = null
+  net.file = makeBytes(2 * 1024 * 1024, 61)
+
+  // 开一个新的 ctx，专门测任务中心（避免前面几百条断言留下的任务干扰计数）
+  const center = makeCtx({ storage: new Map(), currentTrack: FLAC_TRACK })
+  const centerApi = await mod.activate(center.ctx)
+  eq(center.records.taskDefs.length, 0, '刚启用时不动任务中心')
+  eq(typeof centerApi.applyTaskCenter, 'function', '暴露了任务中心同步入口')
+
+  net.file = makeBytes(2 * 1024 * 1024, 61)
+  const centerTask = (await centerApi.startDownloads([FLAC_TRACK], 'auto'))[0]
+  eq(center.records.taskDefs.length, 1, '入队即注册一行（排队中）')
+  const def0 = center.records.taskDefs[0]
+  eq(String(def0.id).startsWith('echo:'), false, 'id 不能占用宿主保留前缀 echo:')
+  includes(def0.id, 'song-downloader:', 'id 用 <插件id>:<任务id>')
+  eq(def0.name, '花落叹 · 涂一乐', '标题是「歌名 · 歌手」')
+  eq(def0.status, 'pending', '入队时状态 = pending（宿主显示「待操作」）')
+  eq(typeof def0.progress.percent, 'number', '带百分比（面板画进度条用）')
+  eq(def0.progress.label, '排队中', 'label 显示排队中')
+  eq(Array.isArray(def0.actions), true, '带操作按钮')
+  eq(def0.actions.some((a) => a.id === 'cancel'), true, '运行中给「停止」')
+  eq(def0.retention.completed.mode, 'auto', '完成后可自动收起')
+  eq(def0.retention.error.mode, 'manual', '失败要留在面板上等处理')
+  eq(typeof def0.retention.completed.delayMs, 'number', '自动收起带 delayMs（漏了宿主会直接抛错）')
+
+  const handle = center.records.taskHandles[0]
+  await waitFor(() => centerTask.status === 'done', '任务完成')
+  eq(handle.calls.start.length >= 1, true, '进入运行态用了 start()（宿主只允许 pending→running）')
+  eq(handle.calls.update.length >= 1, true, '运行期间用 update() 持续刷进度')
+  const percents = handle.calls.update.map((p) => (p.progress ? p.progress.percent : -1))
+  ok(percents.length >= 1 && percents[percents.length - 1] > 0, '进度百分比在涨', { percents })
+  ok(
+    handle.calls.update.some((p) => p.progress && String(p.progress.label).includes('下载中')),
+    'label 里出现过「下载中」',
+    { labels: handle.calls.update.map((p) => (p.progress ? p.progress.label : '')) }
+  )
+  eq(handle.calls.finish.length, 1, '收尾只 finish 一次')
+  eq(handle.calls.finish[0].status, 'completed', '完成态 = completed')
+  eq(handle.calls.finish[0].patch.progress.percent, 100, '完成时进度 100%')
+  eq(handle.calls.finish[0].patch.actions.some((a) => a.id === 'copy'), true, '完成后给「复制直链」')
+  eq(handle.calls.finish[0].patch.actions.some((a) => a.id === 'cancel'), false, '完成后不再给「停止」')
+  eq(handle.entry.status, 'completed', '面板上那一行最终是完成态')
+
+  // 失败 → error 态 + 错误文案 + 重试按钮
+  api.handler = (req) => (req.params.quality === 'auto' || req.params.quality === 'flac' ? failBody(20010) : failBody(20010))
+  const failTask = (await centerApi.startDownloads([FLAC_TRACK], 'flac'))[0]
+  await waitFor(() => failTask.status === 'failed', '失败任务收敛')
+  const failHandle = center.records.taskHandles[center.records.taskHandles.length - 1]
+  eq(failHandle.calls.finish.length, 1, '失败也 finish 一次')
+  eq(failHandle.calls.finish[0].status, 'error', '失败态 = error')
+  eq(failHandle.calls.finish[0].patch.error, failTask.error, '错误文案原样带进面板')
+  eq(failHandle.calls.finish[0].patch.actions.some((a) => a.id === 'retry'), true, '失败给「重试」')
+  api.handler = null
+
+  // 中止 → aborted 态（宿主会 3 秒后自动收起）
+  net.file = makeBytes(4 * 1024 * 1024, 67)
+  const cancelHolder2 = { task: null }
+  net.calls.length = 0
+  net.beforeChunk = async (index) => {
+    if (index === 2 && cancelHolder2.task) centerApi.cancelTask(cancelHolder2.task)
+  }
+  const abortedTask = (await centerApi.startDownloads([FLAC_TRACK], 'auto'))[0]
+  cancelHolder2.task = abortedTask
+  await waitFor(() => abortedTask.status === 'canceled', '中止任务收敛')
+  const abortedHandle = center.records.taskHandles[center.records.taskHandles.length - 1]
+  eq(abortedHandle.calls.finish[0].status, 'aborted', '取消态 = aborted')
+  net.beforeChunk = null
+
+  // 面板上的操作按钮要真的能回调插件（宿主用 runAction 包装，这里直接调）
+  const retryAction = failHandle.calls.finish[0].patch.actions.find((a) => a.id === 'retry')
+  net.file = makeBytes(200 * 1024, 71)
+  const beforeRetry = failTask.status
+  retryAction.onClick()
+  await waitFor(() => failTask.status !== beforeRetry || failTask.status === 'done', '按钮回调生效')
+  await waitFor(() => failTask.status === 'done' || failTask.status === 'failed', '重试收敛')
+
+  // 移除任务 / 清空已完成 → 面板条目也要摘掉
+  const dismissBefore = handle.calls.dismiss
+  centerApi.removeTask(centerTask)
+  eq(handle.calls.dismiss, dismissBefore + 1, '移除任务时同步摘掉面板条目')
+  const activeHandles = center.records.taskHandles.filter((h) => h.active)
+  centerApi.clearFinished()
+  eq(center.records.taskHandles.every((h) => !h.active) || activeHandles.length === 0, true, '清空已完成后面板不再留条目')
+
+  // 关掉开关 → 现有条目全摘掉，之后不再注册
+  const defsBefore = center.records.taskDefs.length
+  centerApi.state.settings.taskCenter = false
+  centerApi.applyTaskCenter(false)
+  eq(center.records.taskHandles.every((h) => !h.active), true, '关掉开关时把已有条目全摘掉')
+  const offTask = (await centerApi.startDownloads([FLAC_TRACK], 'auto'))[0]
+  await waitFor(() => offTask.status === 'done', '关掉后仍能下载')
+  eq(center.records.taskDefs.length, defsBefore, '关掉后不再往任务中心注册')
+
+  // 打开开关 → 把当前任务补一遍
+  centerApi.applyTaskCenter(true)
+  eq(center.records.taskDefs.length > defsBefore, true, '重新打开时把已有任务补进面板')
+
+  // 宿主没有 ctx.tasks（老版本）时要静默降级，而不是报错
+  const noTasks = makeCtx({ storage: new Map() })
+  delete noTasks.ctx.tasks
+  const noTasksApi = await mod.activate(noTasks.ctx)
+  const legacyTask = (await noTasksApi.startDownloads([FLAC_TRACK], 'auto'))[0]
+  await waitFor(() => legacyTask.status === 'done' || legacyTask.status === 'failed', '没有任务中心也能正常下载')
+  eq(legacyTask.status, 'done', '宿主没有任务中心时下载照常')
+  eq(noTasks.records.taskDefs.length, 0, '没有 ctx.tasks 时不会崩，也不会有条目')
 
   /* -------------------------------------------------- 25. dispose 回收 */
   section('25. dispose 回收在跑的任务与全局监听')
