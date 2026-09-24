@@ -457,8 +457,57 @@ function describeFailure(body, status, errorCode) {
   if (status === 503) return '宿主本地接口服务未就绪（需要 EchoMusic ≥ 2.3.2-beta.2，或重启主程序）'
   if (status === 404) return '本地路由不存在（/song/url）'
   const text = (errorCode ? ERROR_TEXT[errorCode] || '' : '') || str(firstOf(body, ['error', 'msg', 'message'])) || ''
-  if (text) return text
+  if (text) {
+    // 上游风控文案（「本次请求需要验证」）单独点名，否则用户不知道要去点验证弹窗
+    if (/需要验证|安全验证|风控/.test(text)) return text + '（账号风控：需要在安全验证弹窗里完成验证）'
+    return text
+  }
   return status && status !== 200 ? 'HTTP ' + status : '接口返回失败'
+}
+
+/* ========================================================================== *
+ * 酷狗安全验证（风控）
+ * --------------------------------------------------------------------------
+ * 主进程的 request 层会把 ssa-code 同时写进 `answer.headers['ssa-code']` 与
+ * `answer.body.ssaCode`（失败时 body 里还会带 edt/sid 行为指纹），
+ * 但**插件这一侧没有任何自动兜底** —— 必须自己唤起宿主的验证弹窗再重试一次。
+ * 判定与重试姿势对齐 auto-team-vip / kugou-recommend（本仓库已验证可用）：
+ *   eventId 存在 且 请求确实失败（error_code=20028 或 status=0）→ 唤起验证 → 成功就原样重试一次。
+ * 注意验证能力必须在 manifest 里声明 `capabilities.kugouVerification`，否则宿主直接抛错。
+ * ========================================================================== */
+
+function verificationEventId(res) {
+  if (!isObj(res)) return ''
+  const body = res.body
+  const headers = res.headers || {}
+  const raw =
+    (isObj(body) && (body.ssaCode || (isObj(body.data) && (body.data.event_id || body.data.eventId)))) ||
+    headers['ssa-code'] ||
+    headers['SSA-CODE'] ||
+    ''
+  const eventId = str(raw)
+  if (!eventId) return ''
+  const errorCode = num(isObj(body) ? body.error_code : 0, 0)
+  const bizStatus = num(isObj(body) ? body.status : 1, 1)
+  if (errorCode !== 20028 && bizStatus !== 0) return ''
+  return eventId
+}
+
+/** 唤起宿主的安全验证弹窗；返回 { ok, error, canceled } */
+async function tryKugouVerify(ctx, eventId, log) {
+  const api = ctx && ctx.kugouVerification
+  if (!api || typeof api.request !== 'function') {
+    return { ok: false, error: '宿主未提供安全验证通道（需要 manifest 声明 capabilities.kugouVerification）' }
+  }
+  try {
+    const r = await api.request(eventId)
+    if (r && r.ok) return { ok: true }
+    return { ok: false, error: (r && r.error) || '安全验证未通过', canceled: !!(r && r.canceled) }
+  } catch (e) {
+    const msg = (e && e.message) || String(e)
+    log('安全验证异常', msg)
+    return { ok: false, error: msg, canceled: /已取消/.test(msg) }
+  }
 }
 
 /* ========================================================================== *
@@ -547,6 +596,37 @@ async function netGetBytesWithRetry(ctx, url, opts, maxRetries, log) {
  * 解析播放地址
  * ========================================================================== */
 
+/** 取一次 /song/url：命中风控时唤起宿主安全验证弹窗，通过后原样重试一次
+ *  verifyState 记住本轮验证的结果：同一轮（一次用户动作）只弹**一次**验证弹窗，
+ *  否则 flac/320/128 三档会连弹三次，用户会以为插件坏了。 */
+async function requestSongUrl(ctx, params, log, verifyState) {
+  let res = await callLocalRoute(ctx, '/song/url', params, 'GET')
+  let verifyError = ''
+  const eventId = verificationEventId(res)
+  if (eventId) {
+    if (verifyState && verifyState.done) {
+      verifyError = verifyState.ok
+        ? '本轮已完成过安全验证，但上游仍要求验证（可稍后再试）'
+        : verifyState.error || '安全验证未通过（点「重试」可再次验证）'
+    } else {
+      const v = await tryKugouVerify(ctx, eventId, log)
+      if (verifyState) {
+        verifyState.done = true
+        verifyState.ok = !!v.ok
+        verifyState.error = v.canceled ? '已取消安全验证，已停止本次下载' : v.error || '安全验证未通过'
+      }
+      if (v.ok) {
+        log('安全验证通过，重试取地址')
+        res = await callLocalRoute(ctx, '/song/url', params, 'GET')
+        if (verificationEventId(res)) verifyError = '安全验证通过后上游仍要求验证（可稍后再试）'
+      } else {
+        verifyError = verifyState ? verifyState.error : v.error || '安全验证未通过'
+      }
+    }
+  }
+  return { res, verifyError }
+}
+
 async function resolveAudio(ctx, track, preferredQuality, log) {
   if (!track || !track.hash) {
     return { ok: false, error: '这首歌没有 hash（本地/云盘歌曲无法解析播放地址）', attempts: [] }
@@ -556,6 +636,8 @@ async function resolveAudio(ctx, track, preferredQuality, log) {
   }
   const qualities = candidateQualities(track, preferredQuality)
   const attempts = []
+  const verifyState = { done: false }
+  let needsVerify = false
   for (const quality of qualities) {
     const hash = pickHashForQuality(track, quality)
     if (!hash) {
@@ -563,13 +645,11 @@ async function resolveAudio(ctx, track, preferredQuality, log) {
       continue
     }
     let res
+    let verifyError = ''
     try {
-      res = await callLocalRoute(
-        ctx,
-        '/song/url',
-        { hash, quality, album_id: track.albumId || 0, album_audio_id: track.albumAudioId || 0 },
-        'GET'
-      )
+      const got = await requestSongUrl(ctx, { hash, quality, album_id: track.albumId || 0, album_audio_id: track.albumAudioId || 0 }, log, verifyState)
+      res = got.res
+      verifyError = got.verifyError
     } catch (e) {
       attempts.push({ quality, hash, error: e && e.message ? e.message : String(e) })
       continue
@@ -589,16 +669,23 @@ async function resolveAudio(ctx, track, preferredQuality, log) {
         attempts
       }
     }
+    if (verifyError) needsVerify = true
     attempts.push({
       quality,
       hash,
       status: res.status,
       errorCode,
-      error: describeFailure(res.body, res.status, errorCode)
+      needsVerify: !!verifyError,
+      error: verifyError || describeFailure(res.body, res.status, errorCode)
     })
   }
   const last = attempts[attempts.length - 1]
-  return { ok: false, error: (last && last.error) || '没有可用的播放地址', attempts }
+  return {
+    ok: false,
+    needsVerify,
+    error: (last && last.error) || '没有可用的播放地址',
+    attempts
+  }
 }
 
 /* ========================================================================== *
@@ -905,7 +992,7 @@ export async function activate(ctx) {
    * 下载确认框的状态。
    * 注意：`handle`（FileSystemFileHandle）**不能**放进 reactive —— 它会被代理包装，
    * 之后 handle.createWritable() 的 this 变成 Proxy，内部槽校验直接抛 Illegal invocation。
-   * 所以句柄单独持有在普通变量 saveHandleRef 里，reactive 里只放"有没有选过位置"。
+   * 所以句柄只作为 startDownloads 的 options 传进去，结束时由 saveTargets 统一回收。
    */
   const dlg = reactive({
     open: false,
@@ -918,9 +1005,10 @@ export async function activate(ctx) {
     toastOnDone: true,
     remember: true,
     error: '',
-    ready: false // 是否已经选好保存位置（picker 模式）
+    busy: false // 正在解析 / 等系统保存对话框
   })
-  let saveHandleRef = null
+  /** 打开确认框的「代际」：解析或保存对话框还没结束时用户关掉弹窗，用它把后续流程作废 */
+  let dlgGen = 0
 
   /** 取消标志与另存为句柄都放在容器外：句柄是宿主对象，放进 reactive 会被代理包装，
    *  之后 handle.createWritable() 的 this 就变成 Proxy，内部槽校验会抛 "Illegal invocation"。 */
@@ -987,6 +1075,8 @@ export async function activate(ctx) {
       directUrl: '',
       error: '',
       warning: '',
+      needsVerify: false,
+      preResolved: null, // 确认框里已解析好的地址（避免重复请求 / 地址过期时会在执行时兜底重解析）
       src: trackSnapshot(track)
     }
     state.tasks.push(task)
@@ -1010,6 +1100,24 @@ export async function activate(ctx) {
     }
   }
 
+  /** 失败/取消时清掉「选择位置」留下的空文件
+   *  （picker 一确认，Chromium 就会先把 0 字节文件建出来；后面任何环节失败都会留下残骸） */
+  async function cleanupSaveTarget(taskId, log) {
+    const handle = saveTargets.get(taskId)
+    if (!handle) return ''
+    saveTargets.delete(taskId)
+    try {
+      if (typeof handle.remove === 'function') {
+        await handle.remove()
+        log('已删除失败留下的空文件')
+        return '（已清理失败留下的空文件）'
+      }
+    } catch (e) {
+      log('删除空文件失败', e)
+    }
+    return '（所选位置可能留下一个 0 KB 空文件：' + (handle.name || '请手动检查') + '）'
+  }
+
   async function executeTask(task) {
     runningCount += 1
     const ctrl = { canceled: false }
@@ -1021,12 +1129,22 @@ export async function activate(ctx) {
       if (!track.hash) throw new Error('这首歌没有 hash（本地/云盘歌曲不支持下载）')
 
       patch(task, { status: 'resolving', phaseText: '解析播放地址…', startedAt: Date.now() })
-      const resolved = await resolveAudio(ctx, track, task.quality, log)
+      // 确认框里如果已经解析过（用户先选位置再开始），直接复用：省一次请求、少一次风控机会
+      let resolved =
+        isObj(task.preResolved) && Array.isArray(task.preResolved.urls) && task.preResolved.urls.length ? task.preResolved : null
+      const reused = !!resolved
+      if (!resolved) resolved = await resolveAudio(ctx, track, task.quality, log)
       if (isCanceled()) {
-        patch(task, { status: 'canceled', endedAt: Date.now(), phaseText: '已取消' })
+        const note = await cleanupSaveTarget(task.id, log)
+        patch(task, { status: 'canceled', endedAt: Date.now(), phaseText: '已取消' + note })
         return
       }
-      if (!resolved.ok) throw new Error(resolved.error || '解析播放地址失败')
+      if (!resolved.ok) {
+        const err = new Error(resolved.error || '解析播放地址失败')
+        err.attempts = resolved.attempts ? resolved.attempts.length : 0
+        err.needsVerify = !!resolved.needsVerify
+        throw err
+      }
 
       const ext = resolved.ext || guessExtByQuality(resolved.quality)
       const mime = mimeForExt(ext)
@@ -1037,13 +1155,13 @@ export async function activate(ctx) {
         status: 'downloading',
         phaseText: '下载中…',
         actualQuality: resolved.quality,
-        attempts: resolved.attempts.length,
+        attempts: (resolved.attempts || []).length,
         fileName
       })
 
       let lastTickAt = Date.now()
       let lastLoaded = 0
-      const result = await downloadBytes(ctx, resolved.urls, {
+      const dlOptions = {
         chunked: !!state.settings.chunked,
         chunkSize: clamp(state.settings.chunkSizeMb, 1, 8) * 1024 * 1024,
         maxRetries: state.settings.maxRetries,
@@ -1058,10 +1176,24 @@ export async function activate(ctx) {
           const speed = dt > 0 ? (db / dt) * 1000 : 0
           patch(task, { loaded: p.loaded, total: p.total, speed })
         }
-      })
+      }
+
+      let result = await downloadBytes(ctx, resolved.urls, dlOptions)
+
+      // 预解析的地址可能已过期（用户在系统保存对话框上停留了很久）：重新解析一次再试
+      if (!result.ok && !result.canceled && reused && !isCanceled()) {
+        log('预解析地址下载失败，重新解析一次', result.error)
+        const again = await resolveAudio(ctx, track, task.quality, log)
+        if (again.ok) {
+          resolved = again
+          patch(task, { actualQuality: again.quality, attempts: (again.attempts || []).length })
+          result = await downloadBytes(ctx, resolved.urls, dlOptions)
+        }
+      }
 
       if (result.canceled || isCanceled()) {
-        patch(task, { status: 'canceled', endedAt: Date.now(), phaseText: '已取消', speed: 0 })
+        const note = await cleanupSaveTarget(task.id, log)
+        patch(task, { status: 'canceled', endedAt: Date.now(), phaseText: '已取消' + note, speed: 0 })
         return
       }
       if (!result.ok) throw new Error(result.error || '下载失败')
@@ -1084,10 +1216,6 @@ export async function activate(ctx) {
         saveResult = await writeToHandle(handle, result.parts, mime)
       } else {
         saveResult = saveViaAnchor(result.parts, fileName, mime, log)
-      }
-      if (isCanceled()) {
-        patch(task, { status: 'canceled', endedAt: Date.now(), phaseText: '已取消', speed: 0 })
-        return
       }
 
       patch(task, {
@@ -1113,6 +1241,7 @@ export async function activate(ctx) {
         url: resolved.urls[0] || '',
         viaChunked: !!result.viaChunked,
         warning,
+        needsVerify: false,
         ok: true
       })
       if (state.settings.toastOnDone) {
@@ -1126,7 +1255,17 @@ export async function activate(ctx) {
       }
     } catch (e) {
       const message = e && e.message ? e.message : String(e)
-      patch(task, { status: 'failed', phaseText: '失败', error: message, endedAt: Date.now(), speed: 0 })
+      const note = await cleanupSaveTarget(task.id, log)
+      const needsVerify = !!(e && e.needsVerify)
+      patch(task, {
+        status: 'failed',
+        phaseText: '失败',
+        error: message + (note ? ' ' + note : ''),
+        endedAt: Date.now(),
+        speed: 0,
+        attempts: (e && e.attempts) || task.attempts,
+        needsVerify
+      })
       pushHistory({
         id: task.id,
         name: task.name,
@@ -1140,6 +1279,7 @@ export async function activate(ctx) {
         url: '',
         viaChunked: false,
         warning: '',
+        needsVerify,
         ok: false,
         error: message
       })
@@ -1213,6 +1353,10 @@ export async function activate(ctx) {
       const task = createTask(track, qualityOverride)
       if (task) {
         if (options.saveHandle) saveTargets.set(task.id, options.saveHandle)
+        // 预解析结果只对「单曲 + 已经解析过」的场景有意义（确认框里先解析、再弹保存对话框）
+        if (options.preResolved && created.length === 0 && tracks.length === 1) {
+          task.preResolved = options.preResolved
+        }
         created.push(task)
       }
     }
@@ -1318,7 +1462,11 @@ export async function activate(ctx) {
     return enqueueCurrent()
   }
 
-  /** 「另存为…」：必须在用户点击手势内调用 picker，所以先选文件再入队 */
+  /**
+   * 「另存为…」：**先解析地址，再弹系统保存对话框**。
+   * 顺序反了的话，解析失败（风控/无版权很常见）会在磁盘上留下一个 0 KB 空文件。
+   * 代价是解析耗时算在「用户手势」的 5 秒有效期内；正常几百毫秒，超时会优雅降级到系统下载目录。
+   */
   async function downloadCurrentAs() {
     const cur = currentTrack()
     if (!cur) {
@@ -1334,24 +1482,28 @@ export async function activate(ctx) {
       notice('当前内核不支持「另存为」，已改为保存到系统下载目录')
       return enqueueCurrent()
     }
-    const quality =
-      state.settings.quality === 'auto' ? availableQualities(track.relateGoods).slice(-1)[0] || '128' : state.settings.quality
-    const ext = guessExtByQuality(quality)
-    const fileName = buildFileName(track, quality, ext, state.settings.fileNameTemplate)
+    const quality = state.settings.quality
+    notice('正在解析播放地址…')
+    const resolved = await resolveAudio(ctx, track, quality, log)
+    if (!resolved.ok) {
+      notice('解析失败：' + resolved.error + '（没有创建任何文件）')
+      return null
+    }
+    const ext = resolved.ext || guessExtByQuality(resolved.quality)
+    const fileName = buildFileName(track, resolved.quality, ext, state.settings.fileNameTemplate)
     let handle
     try {
       handle = await pickSaveHandle(fileName, ext)
     } catch (e) {
-      const msg = (e && e.message) || String(e)
-      if (e && (e.name === 'AbortError' || /cancel|已取消|用户/i.test(msg))) {
-        notice('已取消保存')
+      if (isAbortError(e)) {
+        notice('已取消保存（没有创建文件）')
         return null
       }
       log('另存为对话框失败', e)
       notice('另存为不可用，已改为保存到系统下载目录')
       return enqueueCurrent()
     }
-    const created = startDownloads([cur], state.settings.quality, { saveHandle: handle })
+    const created = startDownloads([cur], quality, { saveHandle: handle, preResolved: resolved })
     return created[0] || null
   }
 
@@ -1399,6 +1551,7 @@ export async function activate(ctx) {
           viaChunked: t.viaChunked,
           attempts: t.attempts,
           warning: t.warning,
+          needsVerify: t.needsVerify,
           error: t.error
         })),
         history: state.history.slice(0, 8),
@@ -1676,6 +1829,9 @@ export async function activate(ctx) {
       ]),
       task.fileName ? h('div', { class: 'sd-muted sd-mono' }, '文件名：' + task.fileName) : null,
       task.warning ? h('div', { class: 'sd-warn' }, '⚠ ' + task.warning) : null,
+      task.needsVerify
+        ? h('div', { class: 'sd-warn', 'data-role': 'needs-verify' }, '⚠ 需要完成酷狗安全验证：点「重试」会再次唤起验证弹窗')
+        : null,
       task.error ? h('div', { class: 'sd-error' }, '✕ ' + task.error) : null
     ])
   }
@@ -1982,23 +2138,28 @@ export async function activate(ctx) {
     dlg.toastOnDone = !!state.settings.toastOnDone
     dlg.remember = true
     dlg.error = ''
-    dlg.ready = false
-    saveHandleRef = null
+    dlg.busy = false
+    dlgGen += 1
     dlg.open = true
     return dlg
   }
 
   function closeDownloadDialog() {
+    dlgGen += 1
     dlg.open = false
     dlg.tracks = []
     dlg.error = ''
-    dlg.ready = false
+    dlg.busy = false
     dlg.pickedName = ''
-    saveHandleRef = null
   }
 
-  /** 「选择位置…」：必须在点击手势里调 picker，所以是「先选位置，再点开始下载」 */
-  async function chooseSaveTarget() {
+  /**
+   * 只把「保存位置」切到 picker，**不**立刻弹系统对话框。
+   * 原因：Chromium 的 showSaveFilePicker 一确认就会先把 0 字节文件建出来，
+   * 如果此刻地址还没解析（风控/版权失败很常见），失败后就会在磁盘上留下一堆空文件。
+   * 所以顺序必须是：点「开始下载」→ 先解析 → 再弹保存对话框 → 再写字节。
+   */
+  function chooseSaveTarget() {
     const first = dlg.tracks[0]
     if (!first) return
     if (dlg.tracks.length > 1) {
@@ -2009,39 +2170,68 @@ export async function activate(ctx) {
       dlg.error = '当前内核不支持「选择位置」；可改用系统下载目录，或用「复制直链」交给下载工具'
       return
     }
-    const q = dlgEffectiveQuality()
-    const ext = guessExtByQuality(q)
-    const name = buildFileName(first.track, q, ext, dlg.template || state.settings.fileNameTemplate)
-    try {
-      const handle = await pickSaveHandle(name, ext)
-      saveHandleRef = handle
-      dlg.pickedName = (handle && handle.name) || name
-      dlg.destination = 'picker'
-      dlg.ready = true
-      dlg.error = ''
-    } catch (e) {
-      if (isAbortError(e)) {
-        dlg.error = '已取消选择位置'
-        return
-      }
-      log('另存为对话框失败', e)
-      dlg.error = '无法打开系统保存对话框：' + ((e && e.message) || String(e))
-    }
+    dlg.destination = 'picker'
+    dlg.pickedName = ''
+    dlg.error = ''
   }
 
-  function confirmDownloadDialog() {
-    if (!dlg.open) return
+  async function confirmDownloadDialog() {
+    if (!dlg.open || dlg.busy) return
     const list = dlg.tracks.slice()
     if (!list.length) {
       closeDownloadDialog()
       return
     }
     const quality = dlg.quality
-    const useHandle = dlg.destination === 'picker' ? saveHandleRef : null
-    if (dlg.destination === 'picker' && !useHandle) {
-      dlg.error = '还没有选择保存位置'
+    const wantPicker = dlg.destination === 'picker'
+    if (wantPicker && list.length > 1) {
+      dlg.error = '批量下载只能存到系统下载目录'
       return
     }
+
+    let preResolved = null
+    let handle = null
+    if (wantPicker) {
+      // gen 用来防「解析/对话框还没结束，用户已经 Esc 关掉弹窗」后仍然开下
+      const gen = (dlgGen += 1)
+      dlg.busy = true
+      dlg.error = ''
+      try {
+        const resolved = await resolveAudio(ctx, list[0].track, quality, log)
+        if (gen !== dlgGen) return
+        if (!resolved.ok) {
+          dlg.error = '解析失败：' + resolved.error + '（没有创建任何文件）'
+          return
+        }
+        preResolved = resolved
+        const ext = resolved.ext || guessExtByQuality(resolved.quality)
+        const name = buildFileName(list[0].track, resolved.quality, ext, dlg.template || state.settings.fileNameTemplate)
+        const h = await pickSaveHandle(name, ext)
+        if (gen !== dlgGen) {
+          // 弹窗已被关掉：把刚建出来的空文件清掉，别留残骸
+          try {
+            if (h && typeof h.remove === 'function') await h.remove()
+          } catch {
+            /* 忽略 */
+          }
+          return
+        }
+        handle = h
+        dlg.pickedName = (h && h.name) || name
+      } catch (e) {
+        if (gen !== dlgGen) return
+        if (isAbortError(e)) {
+          dlg.error = '已取消选择位置（没有创建文件）'
+          return
+        }
+        log('另存为对话框失败', e)
+        dlg.error = '无法打开系统保存对话框：' + ((e && e.message) || String(e))
+        return
+      } finally {
+        if (gen === dlgGen) dlg.busy = false
+      }
+    }
+
     if (dlg.remember) {
       setSetting('quality', quality)
       setSetting('fileNameTemplate', dlg.template || DEFAULT_SETTINGS.fileNameTemplate)
@@ -2049,7 +2239,7 @@ export async function activate(ctx) {
       setSetting('toastOnDone', !!dlg.toastOnDone)
     }
     const raws = list.map((x) => x.raw)
-    const opts = useHandle && list.length === 1 ? { saveHandle: useHandle } : undefined
+    const opts = handle ? { saveHandle: handle, preResolved } : undefined
     closeDownloadDialog()
     startDownloads(raws, quality, opts)
   }
@@ -2062,13 +2252,11 @@ export async function activate(ctx) {
     if (group === 'dest') {
       if (value === 'downloads') {
         dlg.destination = 'downloads'
-        dlg.ready = true
         dlg.pickedName = ''
-        saveHandleRef = null
         dlg.error = ''
         return
       }
-      void chooseSaveTarget()
+      chooseSaveTarget()
     }
   }
 
@@ -2145,9 +2333,11 @@ export async function activate(ctx) {
         { class: 'sd-muted' },
         dlg.destination === 'picker' && dlg.pickedName
           ? '将保存到：' + dlg.pickedName
-          : multi
-            ? '批量下载逐首落到系统下载目录（Windows 通常是 %USERPROFILE%\\Downloads）'
-            : '落到系统下载目录（Windows 通常是 %USERPROFILE%\\Downloads）；想指定位置点「选择位置…」'
+          : dlg.destination === 'picker'
+            ? '点「开始下载」后**先解析播放地址**，再弹出系统保存对话框 —— 解析失败不会创建任何文件（避免留下 0 KB 空文件）'
+            : multi
+              ? '批量下载逐首落到系统下载目录（Windows 通常是 %USERPROFILE%\\Downloads）'
+              : '落到系统下载目录（Windows 通常是 %USERPROFILE%\\Downloads）；想指定位置点「选择位置…」'
       )
     ])
 
@@ -2256,11 +2446,17 @@ export async function activate(ctx) {
                   (dlg.remember ? '✓ ' : '') + '记住这些选项'
                 ),
                 h('div', { class: 'sd-dialog-actions' }, [
-                  h('button', { type: 'button', class: 'sd-btn', 'data-action': 'dlg-cancel', onClick: () => closeDownloadDialog() }, '取消'),
+                  h('button', { type: 'button', class: 'sd-btn', 'data-action': 'dlg-cancel', disabled: !!dlg.busy, onClick: () => closeDownloadDialog() }, '取消'),
                   h(
                     'button',
-                    { type: 'button', class: 'sd-btn sd-btn-primary', 'data-action': 'dlg-confirm', onClick: () => confirmDownloadDialog() },
-                    count > 1 ? '开始下载（' + count + '）' : '开始下载'
+                    {
+                      type: 'button',
+                      class: 'sd-btn sd-btn-primary',
+                      'data-action': 'dlg-confirm',
+                      disabled: !!dlg.busy,
+                      onClick: () => void confirmDownloadDialog()
+                    },
+                    dlg.busy ? '准备中…' : count > 1 ? '开始下载（' + count + '）' : '开始下载'
                   )
                 ])
               ])
@@ -2701,6 +2897,7 @@ export const __internals = {
   extFromUrl,
   pickExt,
   describeFailure,
+  verificationEventId,
   sanitizeFileName,
   buildFileName,
   parseTotalFromContentRange,

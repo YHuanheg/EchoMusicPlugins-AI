@@ -167,6 +167,57 @@ const MUTANTS = [
     name: '设置里切播放栏开关不生效',
     from: `    if (key === 'playerBarButton') applyPlayerBarButton(!!value)`,
     to: `    void (key === 'playerBarButton')`
+  },
+  {
+    name: '不做安全验证兜底（风控时只会干巴巴报「本次请求需要验证」）',
+    from: `  let res = await callLocalRoute(ctx, '/song/url', params, 'GET')
+  let verifyError = ''
+  const eventId = verificationEventId(res)`,
+    to: `  let res = await callLocalRoute(ctx, '/song/url', params, 'GET')
+  let verifyError = ''
+  const eventId = ''`
+  },
+  {
+    name: '验证判定过宽（成功响应里的 ssaCode 也弹验证窗）',
+    from: `  if (errorCode !== 20028 && bizStatus !== 0) return ''`,
+    to: `  if (false && errorCode !== 20028 && bizStatus !== 0) return ''`
+  },
+  {
+    name: '每档音质都弹一次验证窗（flac/320/128 连弹三次）',
+    from: `    if (verifyState && verifyState.done) {`,
+    to: `    if (false) {`
+  },
+  {
+    name: '验证失败也当成功继续（会把「没拿到地址」误判成可以下载）',
+    from: `        if (!resolved.ok) {
+          dlg.error = '解析失败：' + resolved.error + '（没有创建任何文件）'
+          return
+        }`,
+    to: `        if (false) {
+          dlg.error = ''
+          return
+        }`
+  },
+  {
+    name: '「另存为…」先弹保存对话框再解析（失败就留下 0 KB 空文件 —— 用户报的真实问题）',
+    from: `    if (!resolved.ok) {
+      notice('解析失败：' + resolved.error + '（没有创建任何文件）')
+      return null
+    }`,
+    to: `    if (false) {
+      notice('')
+      return null
+    }`
+  },
+  {
+    name: '失败/取消时不清理已建出来的空文件（0 KB 残骸留一地）',
+    from: `      if (typeof handle.remove === 'function') {`,
+    to: `      if (false) {`
+  },
+  {
+    name: '失败任务不标记 needsVerify（界面不再提示去完成验证）',
+    from: `      const needsVerify = !!(e && e.needsVerify)`,
+    to: `      const needsVerify = false`
   }
 ]
 

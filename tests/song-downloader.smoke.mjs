@@ -547,6 +547,8 @@ function makeCtx(options) {
     mounts: [],
     mountDisposals: 0,
     observes: [],
+    verifyCalls: [],
+    verifyMode: 'ok',
     sidebarDisposals: 0,
     toolbarDisposals: 0,
     disposers: []
@@ -673,6 +675,18 @@ function makeCtx(options) {
       }
     },
     electron: { platform: 'win32', api },
+    kugouVerification: o.noVerifyApi
+      ? undefined
+      : {
+          async request(eventId) {
+            records.verifyCalls.push(String(eventId))
+            const mode = records.verifyMode
+            if (mode === 'throw') throw new Error('安全验证通道异常')
+            if (mode === 'cancel') return { ok: false, error: '已取消安全验证', canceled: true }
+            if (mode === 'fail') return { ok: false, error: '验证码错误' }
+            return { ok: true, eventId: String(eventId) }
+          }
+        },
     net,
     dispose(fn) {
       records.disposers.push(fn)
@@ -684,6 +698,7 @@ function makeCtx(options) {
   records.queueRef = queueRef
   records.storage = storage
   records.currentTrack = currentTrack
+  records.ctx = ctx
   return { ctx, records }
 }
 
@@ -821,6 +836,11 @@ async function main() {
   eq(apiOut.state.settings.quality, 'auto', '默认音质 auto')
   eq(apiOut.state.settings.chunked, true, '默认开启分片下载')
   eq(typeof first.records.disposers[0], 'function', '注册了 ctx.dispose 回收函数')
+  {
+    const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'song-downloader', 'manifest.json'), 'utf8'))
+    eq(manifest.capabilities.kugouVerification, true, 'manifest 声明了酷狗安全验证能力（否则 ctx 直接抛错）')
+    eq(manifest.capabilities.unrestrictedNetwork, true, 'manifest 声明了原生网络能力')
+  }
 
   const page = first.records.pages[0].component
   const settingsPanel = first.records.settings[0].component
@@ -1387,6 +1407,7 @@ async function main() {
   // 「选择位置…」→ 走系统保存对话框（单曲）
   const writtenDlg = []
   window.showSaveFilePicker = async (opts) => {
+    pickerCalls += 1
     window.__dlgPicker = opts
     return {
       name: 'D:/音乐/' + opts.suggestedName,
@@ -1402,21 +1423,23 @@ async function main() {
   }
   net.mode = 'range'
   net.file = makeBytes(420 * 1024, 43)
+  pickerCalls = 0
   await findOption(renderOf(dialogComponent), 'dest', 'picker').props.onClick()
-  await tick()
   eq(apiOut.dlg.destination, 'picker', '切到「选择位置」')
-  includes(apiOut.dlg.pickedName, 'D:/音乐/', '记下了选中的文件名')
+  eq(pickerCalls, 0, '此刻**不**弹系统对话框（否则解析失败会留下 0 KB 空文件）')
   dTree = renderOf(dialogComponent)
-  includes(textOf(dTree), '将保存到：', '显示将保存到哪里')
+  includes(textOf(dTree), '先解析播放地址', '界面写明了「先解析、再弹对话框」的顺序')
 
-  // 开始下载：应带上弹窗里的音质与句柄
+  // 开始下载：先解析 → 再弹保存对话框 → 复用解析结果下载（不重复请求）
   api.calls.length = 0
   await findByProp(dTree, 'data-action', 'dlg-confirm').props.onClick()
-  eq(apiOut.dlg.open, false, '确认后关闭弹窗')
   await waitFor(() => apiOut.state.tasks.length === tasksBeforeDlg + 1, '创建了任务')
+  eq(pickerCalls, 1, '点确认时才弹系统保存对话框')
+  eq(apiOut.dlg.open, false, '确认后关闭弹窗')
+  eq(api.calls.length, 1, '确认阶段解析了一次，执行任务时复用（省掉重复请求）')
+  eq(api.calls[0].params.quality, 'flac', '用弹窗里选的音质请求地址')
   const dlgTask = apiOut.state.tasks[apiOut.state.tasks.length - 1]
   await waitFor(() => dlgTask.status === 'done', '弹窗发起的任务完成')
-  eq(api.calls[0].params.quality, 'flac', '用弹窗里选的音质请求地址')
   eq(dlgTask.saveMethod, 'picker', '用弹窗里选的保存位置落盘')
   eq(writtenDlg.length, 1, '写入到用户选的位置')
   eq(writtenDlg[0].equals(net.file), true, '写入字节正确')
@@ -1538,6 +1561,138 @@ async function main() {
   eq(apiOut.dlg.open, false, '关掉后不再弹框')
   eq(apiOut.state.tasks.length, beforeNoDlg + 1, '直接开始下载')
   await waitFor(() => apiOut.state.tasks.every((t) => t.status !== 'downloading' && t.status !== 'resolving' && t.status !== 'saving'), '任务收敛')
+
+  /* -------------------------------------------------- 26. 酷狗安全验证 */
+  section('26. 安全验证：唤起验证弹窗 → 重试')
+  eq(I.verificationEventId({ body: { ssaCode: 'EV1', error_code: 20028, status: 0 } }), 'EV1', 'body.ssaCode + 20028 → 需要验证')
+  eq(I.verificationEventId({ body: { ssaCode: 'EV1', status: 0 } }), 'EV1', 'status=0 也算请求失败')
+  eq(I.verificationEventId({ body: { ssaCode: 'EV1', status: 1, error_code: 0 } }), '', '成功响应里的 ssaCode 不触发验证')
+  eq(I.verificationEventId({ headers: { 'ssa-code': 'EV2' }, body: { status: 0 } }), 'EV2', '响应头 ssa-code 也认')
+  eq(I.verificationEventId({ body: { status: 0, data: { event_id: 'EV3' } } }), 'EV3', 'body.data.event_id 兜底')
+  eq(I.verificationEventId({ body: { status: 0 } }), '', '没有事件标识就不弹窗')
+  includes(I.describeFailure({ msg: '本次请求需要验证' }, 502, 0), '安全验证弹窗', '风控文案给出下一步指引')
+
+  await waitFor(() => apiOut.state.tasks.every((t) => t.status !== 'downloading' && t.status !== 'resolving' && t.status !== 'saving'), '先等任务收敛')
+  net.mode = 'range'
+  net.file = makeBytes(320 * 1024, 47)
+  first.records.currentTrack.value = FLAC_TRACK
+  first.records.verifyCalls.length = 0
+  first.records.verifyMode = 'ok'
+  let verifyPhase = 0
+  api.handler = () => {
+    verifyPhase += 1
+    if (verifyPhase === 1) {
+      return { status: 502, body: { status: 0, error_code: 20028, ssaCode: 'EV-FLOW', msg: '本次请求需要验证' } }
+    }
+    return okBody('flac')
+  }
+  api.calls.length = 0
+  const vTask = (await apiOut.startDownloads([FLAC_TRACK], 'auto'))[0]
+  await waitFor(() => vTask.status === 'done' || vTask.status === 'failed', '验证流程结束')
+  eq(vTask.status, 'done', '验证通过后原样重试成功')
+  eq(first.records.verifyCalls.join(','), 'EV-FLOW', '用响应里的事件标识唤起验证')
+  eq(api.calls.length >= 2, true, '验证后确实重试了请求', { calls: api.calls.length })
+  eq(vTask.needsVerify, false, '成功后不标记需要验证')
+
+  // 取消验证 → 明确失败，并标记 needsVerify（界面会提示「点重试会再唤起验证」）
+  api.handler = () => ({ status: 502, body: { status: 0, error_code: 20028, ssaCode: 'EV-CANCEL', msg: '本次请求需要验证' } })
+  first.records.verifyMode = 'cancel'
+  first.records.verifyCalls.length = 0
+  const vCancel = (await apiOut.startDownloads([FLAC_TRACK], 'auto'))[0]
+  await waitFor(() => vCancel.status === 'failed', '取消验证后失败')
+  includes(vCancel.error, '已取消安全验证', '取消文案明确')
+  eq(vCancel.needsVerify, true, '任务被标记为需要验证')
+  eq(vCancel.attempts, 3, '三档音质都试过（attempts 被记录，便于诊断）')
+  eq(first.records.verifyCalls.length, 1, '同一轮只弹一次验证弹窗（不会每档音质都弹）')
+  tree = renderOf(page)
+  eq(findByProp(tree, 'data-role', 'needs-verify') !== null, true, '任务行显示「需要安全验证」提示')
+
+  // 宿主没有验证能力 → 直接说明原因，不要静默失败
+  first.records.verifyMode = 'ok'
+  const savedVerifyApi = first.ctx.kugouVerification
+  delete first.ctx.kugouVerification
+  const vNoApi = (await apiOut.startDownloads([FLAC_TRACK], 'auto'))[0]
+  await waitFor(() => vNoApi.status === 'failed', '没有验证能力时失败')
+  includes(vNoApi.error, '未提供安全验证通道', '提示宿主能力缺失')
+  first.ctx.kugouVerification = savedVerifyApi
+
+  // 验证通过后仍被要求验证 → 不重复弹窗
+  first.records.verifyCalls.length = 0
+  api.handler = () => ({ status: 502, body: { status: 0, error_code: 20028, ssaCode: 'EV-AGAIN', msg: '本次请求需要验证' } })
+  const vAgain = (await apiOut.startDownloads([FLAC_TRACK], 'auto'))[0]
+  await waitFor(() => vAgain.status === 'failed', '反复要求验证时失败')
+  eq(first.records.verifyCalls.length, 1, '同一轮只弹一次验证')
+  includes(vAgain.error, '仍要求验证', '文案说明已验过仍被拦')
+  api.handler = null
+
+  /* -------------------------------------------------- 27. 失败不留 0 KB 空文件 */
+  section('27. 失败不留 0 KB 空文件')
+  const removed = { count: 0 }
+  window.showSaveFilePicker = async (opts) => {
+    pickerCalls += 1
+    return {
+      name: 'D:/音乐/' + opts.suggestedName,
+      async createWritable() {
+        return {
+          async write(blob) {
+            void blob
+          },
+          async close() {}
+        }
+      },
+      async remove() {
+        removed.count += 1
+      }
+    }
+  }
+
+  // ① 「另存为…」：解析失败 → 根本不弹保存对话框
+  pickerCalls = 0
+  api.handler = () => failBody(20010)
+  const asFail = await apiOut.downloadCurrentAs()
+  eq(asFail, null, '解析失败时不创建任务')
+  eq(pickerCalls, 0, '解析失败时不弹保存对话框（所以不会留下空文件）')
+  includes(JSON.stringify(first.records.toasts), '没有创建任何文件', '明确告诉用户没创建文件')
+
+  // ② 确认框里选「选择位置」+ 解析失败 → 不弹对话框、弹窗留着报错
+  apiOut.state.settings.confirmBeforeDownload = true
+  tree = renderOf(page)
+  await findByProp(tree, 'data-action', 'download-current').props.onClick()
+  eq(apiOut.dlg.open, true, '确认框打开')
+  pickerCalls = 0
+  await findOption(renderOf(dialogComponent), 'dest', 'picker').props.onClick()
+  const before2 = apiOut.state.tasks.length
+  await findByProp(renderOf(dialogComponent), 'data-action', 'dlg-confirm').props.onClick()
+  await waitFor(() => String(apiOut.dlg.error).includes('解析失败'), '弹窗里出现解析失败')
+  eq(pickerCalls, 0, '解析失败时不弹保存对话框')
+  eq(apiOut.dlg.open, true, '弹窗留着，让用户改完设置再试')
+  eq(apiOut.dlg.busy, false, '失败后 busy 复位')
+  eq(apiOut.state.tasks.length, before2, '没有创建任务')
+  apiOut.closeDownloadDialog()
+
+  // ③ 解析成功、下载却失败 → 把 picker 已经建出来的空文件删掉
+  pickerCalls = 0
+  removed.count = 0
+  api.handler = () => okBody('flac')
+  net.mode = 'http500'
+  const asClean = await apiOut.downloadCurrentAs()
+  await waitFor(() => asClean && (asClean.status === 'failed' || asClean.status === 'done'), '失败流程收敛')
+  eq(pickerCalls, 1, '解析成功后正常弹了保存对话框')
+  eq(asClean.status, 'failed', '下载失败')
+  eq(removed.count, 1, '失败时删掉了 picker 建出的空文件')
+  includes(asClean.error, '已清理失败留下的空文件', '任务行说明已清理')
+  net.mode = 'range'
+  api.handler = null
+
+  // ④ 成功路径不能误删文件
+  removed.count = 0
+  net.file = makeBytes(200 * 1024, 53)
+  const asOk = await apiOut.downloadCurrentAs()
+  await waitFor(() => asOk && asOk.status === 'done', '成功路径')
+  eq(removed.count, 0, '成功时不动用户的文件')
+  eq(asOk.saveMethod, 'picker', '仍然写进用户选的位置')
+  delete window.showSaveFilePicker
+  apiOut.state.settings.confirmBeforeDownload = false
 
   /* -------------------------------------------------- 25. dispose 回收 */
   section('25. dispose 回收在跑的任务与全局监听')

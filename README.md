@@ -258,10 +258,11 @@ tests/tag-filter.mutate.mjs   变异测试（把关键行为改回 bug，确认�
 
 # 歌曲下载（`song-downloader`）
 
-> 当前版本 **1.1.0** · 需要 EchoMusic **≥ 2.3.2-beta.2**
+> 当前版本 **1.1.1** · 需要 EchoMusic **≥ 2.3.2-beta.2**
 
 把「当前播放」或「播放队列」里的歌下载到本地：**下载前弹确认框**选音质 / 保存位置 / 文件名，
 **播放栏**与标题栏都有一键下载按钮，分片下载带**真实进度与速度**，支持批量任务、失败重试与直链复制。
+遇到酷狗风控会自动唤起**安全验证弹窗**并在通过后重试。
 
 ```
 下载歌曲                                        ✕
@@ -284,10 +285,12 @@ tests/tag-filter.mutate.mjs   变异测试（把关键行为改回 bug，确认�
 | 默认 **Range 分片下载**（1 MiB/片）自建进度与速度 | 宿主 `ctx.net.request` 没有字节回调；分片还能顺带支持「停止」与真实速率。**`maxResponseBytes` 必须传 0**，否则默认 32 MiB 会截断大 FLAC |
 | 落盘走 `Blob + <a download>`（系统下载目录），可选 `showSaveFilePicker` | 宿主把「写任意路径」堵死了：`ctx.fs.writeFile` 被限制在插件目录内且单次 ≤ 8 MB，`ctx.process.launch` 只允许插件目录内的 exe，主进程也没有 `will-download`。不绕过这条安全边界 |
 | 设置根节点**不能**自带 `height:100%` + `overflow-y:auto` | 插件页（`.plugin-page-host`，有确定高度）该由插件自己滚；而插件设置渲染在宿主的弹窗滚动容器（`.dialog-scroll-area`）里，该由**宿主**滚。写错就变成「自己高度=内容高度 → 谁都滚不了」（1.0.0 的真实 bug，已加 CSS 契约测试锁死） |
+| 风控（「本次请求需要验证」）**必须插件自己接** | 宿主不会替插件兜底：要把 `ssaCode` 拿去 `ctx.kugouVerification.request()` 唤起安全验证弹窗，通过后原样重试一次；同一轮只弹一次，否则逐档音质会连弹三次 |
+| 「选择位置」必须**先解析、再弹保存对话框** | `showSaveFilePicker()` 一确认就先建出 0 字节文件；顺序反了，解析失败（风控/无版权）就会在磁盘上留一堆 0 KB 残骸（1.1.0 的真实反馈，1.1.1 修） |
 
 ```
-tests/song-downloader.smoke.mjs    无头集成测试（真实 Vue 3 ESM + mock ctx + 真实 Range 语义的假 CDN）260/260 通过
-tests/song-downloader.mutate.mjs   变异测试（把关键行为改回 bug，确认断言有效）                      22/22 被抓到
+tests/song-downloader.smoke.mjs    无头集成测试（真实 Vue 3 ESM + mock ctx + 真实 Range 语义的假 CDN）297/297 通过
+tests/song-downloader.mutate.mjs   变异测试（把关键行为改回 bug，确认断言有效）                      28/28 被抓到
 ```
 
 测试里假 CDN **真实实现 Range 语义**，所以能断言「拼装后的字节与源文件逐字节一致」；
