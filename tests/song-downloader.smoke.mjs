@@ -45,12 +45,21 @@ function section(name) {
   currentSection = name
 }
 
+/** DOM 节点带 parentNode 循环引用，直接 JSON.stringify 会炸 —— 断言里可能比较节点，所以兜一层 */
+function safeJson(value) {
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return '[' + (value && value.constructor ? value.constructor.name : typeof value) + ']'
+  }
+}
+
 function ok(cond, name, extra) {
   if (cond) {
     pass++
     return true
   }
-  failures.push('[' + currentSection + '] ' + name + (extra === undefined ? '' : ' :: ' + JSON.stringify(extra).slice(0, 500)))
+  failures.push('[' + currentSection + '] ' + name + (extra === undefined ? '' : ' :: ' + safeJson(extra).slice(0, 500)))
   return false
 }
 
@@ -224,14 +233,30 @@ class FEl {
     if (this.parentNode) this.parentNode.removeChild(this)
   }
 
-  /** 只支持 `.class` 选择器（插件就用了这一种） */
   querySelector(selector) {
     return this.querySelectorAll(selector)[0] || null
   }
 
+  /** 支持 `.cls` 与后代选择器 `.a .b`（插件用到的就这两种） */
   querySelectorAll(selector) {
-    const cls = String(selector).replace(/^\./, '')
-    return descendantsOf(this).filter((el) => el._classes && el._classes.has(cls))
+    const parts = String(selector)
+      .trim()
+      .split(/\s+/)
+      .map((p) => p.replace(/^\./, ''))
+      .filter(Boolean)
+    if (!parts.length) return []
+    let candidates = [this]
+    for (const cls of parts) {
+      const next = []
+      for (const node of candidates) {
+        for (const el of descendantsOf(node)) {
+          if (el._classes && el._classes.has(cls)) next.push(el)
+        }
+      }
+      if (!next.length) return []
+      candidates = next
+    }
+    return candidates
   }
 
   get textContent() {
@@ -609,6 +634,9 @@ function makeCtx(options) {
     observes: [],
     verifyCalls: [],
     verifyMode: 'ok',
+    resolveCalls: [],
+    resolveResult: null,
+    resolveThrows: false,
     taskDefs: [],
     taskHandles: [],
     taskGens: 0,
@@ -624,6 +652,12 @@ function makeCtx(options) {
     currentAudioUrl: '',
     currentAudioCandidateUrls: [],
     currentResolvedAudioQuality: null
+  }
+  /** 宿主播放器 store 上的纯解析器（只解析、不播放）：插件可以借它拿到可播地址 */
+  playerState.resolveAudioUrl = async (track, options) => {
+    records.resolveCalls.push({ track, options })
+    if (records.resolveThrows) throw new Error('宿主解析炸了')
+    return records.resolveResult
   }
   // 播放栏容器（宿主那边是 `.player-actions` 右侧动作区）。
   // 默认**不**建：真实场景里它是后出现的，插件必须先等宿主把页面渲染出来。
@@ -935,9 +969,14 @@ async function main() {
   eq(!!dialogComponent, true, '下载确认框已 teleport 到 body')
   eq(first.records.teleports[0].options.className, 'sd-teleport', 'teleport 带了插件自己的类名')
 
-  section('3b. 播放栏按钮：挂载时机与去重')
-  eq(first.records.observes.length >= 1, true, '监听了 .player-actions')
+  section('3b. 播放栏按钮：主栏 / 歌词页 / 挂载时机与去重')
+  eq(first.records.observes.length >= 1, true, '监听了播放栏容器')
   eq(first.records.observes[0].selector, '.player-actions', '监听的是播放栏右侧动作区')
+  eq(
+    first.records.observes.map((o) => o.selector).includes('.lyric-bar'),
+    true,
+    '也监听了歌词页底栏（歌词页打开时才出现）'
+  )
   eq(first.records.mounts.length, 0, '宿主页面还没出现时不会盲目挂载')
   const barHost = doc.createElement('div')
   barHost.className = 'player-actions'
@@ -950,6 +989,29 @@ async function main() {
   first.records.observes[0].cb()
   eq(first.records.mounts.length, 1, '重复回调不会挂第二个（去重）')
 
+  // 歌词页底栏：挂进 .lyric-bar .bar-right（宿主样式会把里面的 button 刷成白色）
+  const lyricBar = doc.createElement('div')
+  lyricBar.className = 'lyric-bar'
+  const lyricRight = doc.createElement('div')
+  lyricRight.className = 'bar-right'
+  lyricBar.appendChild(lyricRight)
+  doc.body.appendChild(lyricBar)
+  await first.records.observes.find((o) => o.selector === '.lyric-bar').cb()
+  eq(first.records.mounts.length, 2, '歌词页底栏也挂上了按钮')
+  eq(first.records.mounts[1].host, lyricRight, '挂在 .lyric-bar .bar-right 里（不是整个歌词栏）')
+  eq(lyricRight.querySelector('.sd-bar-btn') !== null, true, '歌词页底栏能看到按钮')
+  await first.records.observes.find((o) => o.selector === '.lyric-bar').cb()
+  eq(first.records.mounts.length, 2, '歌词页重复回调也只挂一个')
+
+  // 歌词页关掉（容器消失）→ 按钮跟着收掉
+  const mountsBeforeClose = first.records.mounts.length
+  const disposalsBefore = first.records.mountDisposals
+  lyricBar.remove()
+  await first.records.observes.find((o) => o.selector === '.lyric-bar').cb()
+  eq(first.records.mountDisposals, disposalsBefore + 1, '歌词页关闭时卸载了那一组按钮')
+  eq(first.records.mounts.length, mountsBeforeClose, '不会再往不存在的主机里挂')
+  doc.body.appendChild(lyricBar)
+
   // 宿主原地重渲会把节点抹掉：MutationObserver 兜底要能补回来
   first.records.mounts[0].marker.remove()
   eq(first.records.barHost.querySelector('.sd-bar-btn'), null, '模拟宿主把按钮抹掉')
@@ -957,8 +1019,9 @@ async function main() {
   ok(!!barObserver, '注册了 MutationObserver 兜底')
   barObserver.trigger()
   await new Promise((r) => realSetTimeout(r, 260))
-  eq(first.records.mounts.length, 2, '节点被抹掉后自动补挂')
-  eq(first.records.barHost.querySelector('.sd-bar-btn') !== null, true, '按钮回来了')
+  ok(first.records.mounts.length >= mountsBeforeClose, '节点被抹掉后自动补挂', { mounts: first.records.mounts.length })
+  eq(first.records.barHost.querySelector('.sd-bar-btn') !== null, true, '主栏按钮回来了')
+  eq(lyricRight.querySelector('.sd-bar-btn') !== null, true, '歌词页按钮也在位')
 
   /* -------------------------------------------------- 4. 无歌 / 空队列的降级 */
   section('4. 没有在播歌曲时的降级')
@@ -1628,8 +1691,9 @@ async function main() {
   switch2.props.onClick()
   eq(apiOut.state.settings.playerBarButton, true, '再打开')
   await tick()
-  eq(first.records.mounts.length, mountsBefore + 1, '重新挂载')
-  eq(first.records.barHost.querySelector('.sd-bar-btn') !== null, true, '按钮又回来了')
+  ok(first.records.mounts.length >= mountsBefore + 1, '重新挂载', { mounts: first.records.mounts.length, mountsBefore })
+  eq(first.records.barHost.querySelector('.sd-bar-btn') !== null, true, '主播放栏按钮又回来了')
+  eq(doc.querySelector('.lyric-bar .bar-right').querySelector('.sd-bar-btn') !== null, true, '歌词页底栏按钮也回来了')
   // 恢复默认值，下一段要验「确认框默认开启」
   apiOut.state.settings.confirmBeforeDownload = true
 
@@ -1815,7 +1879,7 @@ async function main() {
   eq(net.calls.length >= 1, true, '直接从 CDN 取字节')
   includes(String(net.calls[0].url), 'host-stream', '第一次请求就是宿主地址')
   tree = renderOf(page)
-  includes(textOf(tree), '音源：宿主已解析地址', '任务行写明了音源')
+  includes(textOf(tree), '音源：宿主播放器已解析的地址', '任务行写明了音源')
   eq(findByProp(tree, 'data-role', 'task-source') !== null, true, '任务行有音源标记')
 
   // 关掉这个开关 → 回到自己请求 /song/url
@@ -1990,6 +2054,110 @@ async function main() {
   await waitFor(() => legacyTask.status === 'done' || legacyTask.status === 'failed', '没有任务中心也能正常下载')
   eq(legacyTask.status, 'done', '宿主没有任务中心时下载照常')
   eq(noTasks.records.taskDefs.length, 0, '没有 ctx.tasks 时不会崩，也不会有条目')
+
+  /* -------------------------------------------------- 30. 借宿主的解析通道 */
+  section('30. 借宿主解析通道（模拟播放请求但不真的播放）')
+  await waitFor(() => apiOut.state.tasks.every((t) => t.status !== 'downloading' && t.status !== 'resolving' && t.status !== 'saving'), '先等任务收敛')
+  first.records.currentTrack.value = FLAC_TRACK
+  first.records.resetPlayerState() // 当前没有播放缓存地址 → 走「请宿主解析」
+  apiOut.state.settings.confirmBeforeDownload = false
+  apiOut.state.settings.preferHostUrl = true
+  apiOut.state.settings.quality = 'auto'
+  api.handler = null
+  net.mode = 'range'
+  net.failPattern = null
+  net.file = makeBytes(320 * 1024, 73)
+
+  // ① auto + 非当前曲目 → 请宿主解析，完全不打自己的 /song/url
+  first.records.resolveCalls.length = 0
+  first.records.resolveResult = {
+    url: 'https://cdn.test/host-resolved.flac',
+    urls: ['https://cdn.test/host-resolved.flac', 'https://cdn.test/host-resolved-backup.mp3'],
+    quality: 'flac'
+  }
+  api.calls.length = 0
+  const hostResolvedTask = (await apiOut.startDownloads([LOW_TRACK], 'auto'))[0]
+  await waitFor(() => hostResolvedTask.status === 'done' || hostResolvedTask.status === 'failed', '宿主解析流程收敛')
+  eq(first.records.resolveCalls.length, 1, '确实请了宿主解析')
+  eq(api.calls.length, 0, '没有自己去打 /song/url')
+  eq(hostResolvedTask.status, 'done', '宿主解析的地址能下下来')
+  eq(hostResolvedTask.source, 'host-resolve', '音源标记 = 宿主解析通道')
+  eq(hostResolvedTask.actualQuality, 'flac', '音质取宿主给的')
+  includes(String(hostResolvedTask.directUrl), 'host-resolved', '用的就是宿主给的地址')
+  eq(first.records.resolveCalls[0].track.hash, LOW_TRACK.hash, '请求里带上曲目 hash')
+  eq(Array.isArray(first.records.resolveCalls[0].track.relateGoods), true, '带上 relateGoods（省宿主一次反查）')
+  tree = renderOf(page)
+  includes(textOf(tree), '宿主解析通道', '任务行写明了音源')
+
+  // ② 宿主解析器炸了 → 静默回退到自己请求
+  first.records.resolveThrows = true
+  api.calls.length = 0
+  const fallbackAfterThrow = (await apiOut.startDownloads([LOW_TRACK], 'auto'))[0]
+  await waitFor(() => fallbackAfterThrow.status === 'done' || fallbackAfterThrow.status === 'failed', '解析器异常后收敛')
+  first.records.resolveThrows = false
+  eq(fallbackAfterThrow.status, 'done', '宿主解析器异常也能下下来')
+  eq(fallbackAfterThrow.source, 'api', '回退到自己请求')
+  eq(api.calls.length >= 1, true, '回退时确实打了 /song/url')
+
+  // ③ 宿主解析没给出可用地址 → 同样回退
+  first.records.resolveResult = { url: '', urls: [] }
+  api.calls.length = 0
+  const fallbackAfterEmpty = (await apiOut.startDownloads([LOW_TRACK], 'auto'))[0]
+  await waitFor(() => fallbackAfterEmpty.status === 'done' || fallbackAfterEmpty.status === 'failed', '空结果后收敛')
+  eq(fallbackAfterEmpty.source, 'api', '宿主没解析出地址时回退自己请求')
+
+  // ④ 显式要高音质 → 先自己请求（尊重用户选的档位），不打宿主解析
+  first.records.resolveResult = { url: 'https://cdn.test/host-resolved.flac', urls: ['https://cdn.test/host-resolved.flac'], quality: '320' }
+  first.records.resolveCalls.length = 0
+  api.calls.length = 0
+  const explicitTask = (await apiOut.startDownloads([FLAC_TRACK], 'flac'))[0]
+  await waitFor(() => explicitTask.status === 'done', '显式音质任务完成')
+  eq(api.calls.length >= 1, true, '显式音质时自己请求（不被宿主的低音质糊弄）')
+  eq(first.records.resolveCalls.length, 0, '此时不动用宿主解析')
+  eq(explicitTask.source, 'api', '音源 = 自己请求')
+
+  // ⑤ 但自己请求被风控拦下（且用户没取消验证）→ 再借宿主解析通道救一把
+  api.handler = () => ({ status: 502, body: { status: 0, error_code: 20028, ssaCode: 'EV-HOST', msg: '本次请求需要验证' } })
+  first.records.verifyMode = 'fail' // 验证没通过（不是用户取消）→ 允许再走宿主
+  first.records.resolveCalls.length = 0
+  const rescuedTask = (await apiOut.startDownloads([FLAC_TRACK], 'flac'))[0]
+  await waitFor(() => rescuedTask.status === 'done' || rescuedTask.status === 'failed', '风控后借用宿主收敛')
+  eq(rescuedTask.status, 'done', '自己请求被风控拦下后靠宿主通道救回来了')
+  eq(rescuedTask.source, 'host-resolve', '音源 = 宿主解析通道')
+  eq(first.records.resolveCalls.length, 1, '确实请了宿主解析')
+  api.handler = null
+  first.records.verifyMode = 'ok'
+
+  // ⑥ 用户主动取消验证时不再去打扰（不弹宿主的验证窗）
+  api.handler = () => ({ status: 502, body: { status: 0, error_code: 20028, ssaCode: 'EV-CANCEL2', msg: '本次请求需要验证' } })
+  first.records.verifyMode = 'cancel'
+  first.records.resolveCalls.length = 0
+  const canceledTask = (await apiOut.startDownloads([FLAC_TRACK], 'flac'))[0]
+  await waitFor(() => canceledTask.status === 'failed', '取消验证后失败')
+  eq(first.records.resolveCalls.length, 0, '用户取消了验证就不再弹宿主的验证窗')
+  api.handler = null
+  first.records.verifyMode = 'ok'
+
+  // ⑦ 设置里关掉「借宿主通道」→ auto 也直接自己请求
+  apiOut.state.settings.preferHostUrl = false
+  first.records.resolveCalls.length = 0
+  api.calls.length = 0
+  const selfOnly = (await apiOut.startDownloads([LOW_TRACK], 'auto'))[0]
+  await waitFor(() => selfOnly.status === 'done', '关掉宿主通道后自己请求')
+  eq(first.records.resolveCalls.length, 0, '关掉后不请宿主解析')
+  eq(api.calls.length >= 1, true, '改走自己的 /song/url')
+  eq(selfOnly.source, 'api', '音源 = 自己请求')
+
+  // ⑧ 老宿主没有解析器 → 静默降级
+  apiOut.state.settings.preferHostUrl = true
+  const savedResolve = first.records.playerState.resolveAudioUrl
+  delete first.records.playerState.resolveAudioUrl
+  const noResolver = (await apiOut.startDownloads([LOW_TRACK], 'auto'))[0]
+  await waitFor(() => noResolver.status === 'done' || noResolver.status === 'failed', '没有解析器时收敛')
+  eq(noResolver.status, 'done', '宿主没有解析器也能下')
+  eq(noResolver.source, 'api', '降级到自己请求')
+  first.records.playerState.resolveAudioUrl = savedResolve
+  first.records.resolveResult = null
 
   /* -------------------------------------------------- 25. dispose 回收 */
   section('25. dispose 回收在跑的任务与全局监听')

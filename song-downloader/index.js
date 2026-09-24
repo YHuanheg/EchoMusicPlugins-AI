@@ -487,14 +487,23 @@ function extractUrls(payload) {
   }
   walk(payload, 0)
 
-  const isImage = (u) => {
-    const ext = extFromUrl(u)
-    return !!ext && IMAGE_EXT.includes(ext)
-  }
-  const audio = out.filter((u) => !isImage(u))
+  const audio = filterAudioUrls(out)
   // 带音频后缀的排前面，避免把无后缀的杂项地址当首选
   audio.sort((a, b) => (AUDIO_EXT.includes(extFromUrl(a)) ? 0 : 1) - (AUDIO_EXT.includes(extFromUrl(b)) ? 0 : 1))
   return audio
+}
+
+/** 剔除图片地址并去重（封面混进候选会把 jpg 当歌曲存盘）—— 宿主给回来的地址列表也要过一遍 */
+function filterAudioUrls(list) {
+  const out = []
+  for (const item of list || []) {
+    const url = str(item)
+    if (!url) continue
+    const ext = extFromUrl(url)
+    if (ext && IMAGE_EXT.includes(ext)) continue
+    if (!out.includes(url)) out.push(url)
+  }
+  return out
 }
 
 function extFromUrl(url) {
@@ -665,6 +674,69 @@ async function netGetBytesWithRetry(ctx, url, opts, maxRetries, log) {
  * 解析播放地址
  * ========================================================================== */
 
+/** 宿主的播放地址解析器需要它自己那套 track 形状（hash / relateGoods / albumAudioId / source…） */
+function hostTrackShape(track) {
+  if (!track) return null
+  return {
+    id: track.id,
+    name: track.name,
+    title: track.name,
+    artist: track.artist,
+    album: track.album,
+    albumId: track.albumId,
+    albumAudioId: track.albumAudioId,
+    mixSongId: track.albumAudioId || track.albumId,
+    duration: track.duration,
+    hash: track.hash,
+    source: track.source || undefined,
+    audioUrl: track.audioUrl || undefined,
+    relateGoods: Array.isArray(track.relateGoods) && track.relateGoods.length ? track.relateGoods : undefined
+  }
+}
+
+/**
+ * 请宿主「解析」这首的可播地址 —— 等价于模拟一次播放请求，但**不会真的播放**、
+ * 也不动当前曲目与队列（宿主把这个纯解析器放在了 player store 上：`resolveAudioUrl`）。
+ *
+ * 这是风控账号下的正解：宿主解析器走的是它自己的 API 层 `Q.get('/song/url')`，
+ * **自带风控兜底**（取到 ssaCode → 弹宿主的验证窗 → 通过后带 retriedAfterKugouVerification 重试整条请求），
+ * 而插件侧的 IPC 通道完全没有这层。所以「下载没在播的歌」也应该借宿主的路。
+ *
+ * 注意：它只做解析（内部会顺带补 relateGoods），不会写 currentAudioUrl、不会切歌。
+ */
+async function resolveViaHostResolver(ctx, track, log) {
+  let player = null
+  try {
+    player = ctx && ctx.stores && ctx.stores.player
+  } catch {
+    player = null
+  }
+  if (!player || typeof player.resolveAudioUrl !== 'function') return null
+  const shape = hostTrackShape(track)
+  if (!shape || !shape.hash) return null
+  try {
+    const res = await player.resolveAudioUrl(shape, { forceReload: false })
+    const urls = filterAudioUrls([...(Array.isArray(res && res.urls) ? res.urls : []), res && res.url])
+    if (!urls.length) {
+      log('宿主解析没给出可用地址')
+      return null
+    }
+    log('宿主解析成功', str(res && res.quality) || extFromUrl(urls[0]) || '未知音质', urls.length + ' 条候选')
+    return {
+      ok: true,
+      urls,
+      quality: str(res && res.quality).toLowerCase(),
+      hash: shape.hash,
+      ext: extFromUrl(urls[0]),
+      source: 'host-resolve',
+      attempts: []
+    }
+  } catch (e) {
+    log('宿主解析失败，回退自己请求', (e && e.message) || String(e))
+    return null
+  }
+}
+
 /** 取一次 /song/url：命中风控时唤起宿主安全验证弹窗，通过后原样重试一次
  *  verifyState 记住本轮验证的结果：同一轮（一次用户动作）只弹**一次**验证弹窗，
  *  否则 flac/320/128 三档会连弹三次，用户会以为插件坏了。 */
@@ -722,10 +794,19 @@ async function resolveAudio(ctx, track, preferredQuality, log, opts) {
     }
   }
 
+  // ② 请求「自动」时：先请宿主解析（它自带风控兜底，会弹宿主自己的验证窗并自动重试）
+  const wantAuto = !preferredQuality || preferredQuality === 'auto'
+  const hostAllowed = options.preferHostUrl !== false
+  if (hostAllowed && wantAuto) {
+    const viaHost = await resolveViaHostResolver(ctx, track, log)
+    if (viaHost) return viaHost
+  }
+
   const qualities = candidateQualities(track, preferredQuality)
   const attempts = []
   const verifyState = { done: false, ok: false, error: '' }
   let needsVerify = false
+  let verifyCanceled = false
   for (const quality of qualities) {
     const hash = pickHashForQuality(track, quality)
     if (!hash) {
@@ -758,7 +839,10 @@ async function resolveAudio(ctx, track, preferredQuality, log, opts) {
         attempts
       }
     }
-    if (verifyError) needsVerify = true
+    if (verifyError) {
+      needsVerify = true
+      if (/已取消/.test(verifyError)) verifyCanceled = true
+    }
     attempts.push({
       quality,
       hash,
@@ -769,7 +853,15 @@ async function resolveAudio(ctx, track, preferredQuality, log, opts) {
     })
   }
 
-  // ② 上游全部失败（常见是风控）时，曲目身上残留的宿主地址还能救一把
+  // ③ 自己请求失败（很可能是风控）时，再借宿主的解析通道 —— 它才有真正的验证兜底
+  //    （用户主动取消了验证就不再打扰：宿主的验证窗会再来一次）
+  if (hostAllowed && !wantAuto && needsVerify && !verifyCanceled) {
+    log('自己取地址被风控拦下，改请宿主解析')
+    const viaHost = await resolveViaHostResolver(ctx, track, log)
+    if (viaHost) return { ...viaHost, attempts }
+  }
+
+  // ④ 上游全部失败时，曲目身上残留的宿主地址还能救一把
   if (host.urls.length && !host.current) {
     const ext = extFromUrl(host.urls[0])
     log('上游取地址失败，改用曲目上残留的宿主地址兜底')
@@ -1859,6 +1951,14 @@ export async function activate(ctx) {
     return '失败'
   }
 
+  /** 任务行/历史里的「音源」说明（host / host-resolve / stale 分别是什么） */
+  function sourceText(src) {
+    if (src === 'host') return '宿主播放器已解析的地址（未请求上游）'
+    if (src === 'host-resolve') return '宿主解析通道（自带风控兜底）'
+    if (src === 'stale') return '曲目上残留的宿主地址（兜底）'
+    return ''
+  }
+
   function taskProgress(task) {
     if (!task.total) return task.status === 'done' ? 100 : 0
     return Math.min(100, Math.max(0, Math.round((task.loaded / task.total) * 100)))
@@ -2101,12 +2201,8 @@ export async function activate(ctx) {
         h('span', { class: 'sd-muted' }, taskTimeText(task))
       ]),
       task.fileName ? h('div', { class: 'sd-muted sd-mono' }, '文件名：' + task.fileName) : null,
-      task.source === 'host' || task.source === 'stale'
-        ? h(
-            'div',
-            { class: 'sd-muted', 'data-role': 'task-source' },
-            '音源：' + (task.source === 'host' ? '宿主已解析地址（未请求上游）' : '曲目上残留的宿主地址（兜底，未请求上游）')
-          )
+      sourceText(task.source)
+        ? h('div', { class: 'sd-muted', 'data-role': 'task-source' }, '音源：' + sourceText(task.source))
         : null,
       task.warning ? h('div', { class: 'sd-warn' }, '⚠ ' + task.warning) : null,
       task.needsVerify
@@ -2148,8 +2244,9 @@ export async function activate(ctx) {
                 h('div', { class: 'sd-row-chips' }, [
                   h('span', { class: 'sd-chip' }, item.ok ? formatBytes(item.bytes) : '—'),
                   item.viaChunked ? h('span', { class: 'sd-chip' }, '分片') : null,
-                  item.source === 'host' ? h('span', { class: 'sd-chip' }, '宿主地址') : null,
-                  item.source === 'stale' ? h('span', { class: 'sd-chip' }, '残留地址') : null,
+                    item.source === 'host' ? h('span', { class: 'sd-chip' }, '宿主地址') : null,
+                    item.source === 'host-resolve' ? h('span', { class: 'sd-chip' }, '宿主解析') : null,
+                    item.source === 'stale' ? h('span', { class: 'sd-chip' }, '残留地址') : null,
                   item.warning ? h('span', { class: 'sd-chip sd-chip-warn', title: item.warning }, '体积偏小') : null
                 ]),
                 h('div', { class: 'sd-task-actions' }, [
@@ -2308,8 +2405,8 @@ export async function activate(ctx) {
             toggle('confirmBeforeDownload', '下载前弹确认框', '每次下载前弹窗确认音质 / 保存位置 / 文件名；关掉则直接用下面的默认设置开始下载'),
             toggle(
               'preferHostUrl',
-              '复用宿主已解析的播放地址',
-              '正在播放的那首歌直接用播放器已经解析好的地址（音质跟随播放音质）——不发请求，也就不会触发风控；其它曲子仍走接口'
+              '优先借宿主的通道取播放地址',
+              '正在播放的歌直接复用播放器已解析好的地址；其它曲子也优先请宿主解析（宿主自带风控兜底，会弹它自己的验证窗）——关掉则一律自己请求上游'
             ),
             toggle(
               'taskCenter',
@@ -2779,7 +2876,6 @@ export async function activate(ctx) {
 
   /* ---------------- 播放栏按钮 ---------------- */
 
-  let barMountDispose = null
   let barObserveDispose = null
   let barMutation = null
   let barTimer = null
@@ -2851,29 +2947,94 @@ export async function activate(ctx) {
 
   /**
    * 播放栏没有「插件按钮」这种一等公民 API，所以走宿主给的 DOM 挂载通道：
-   *   ctx.ui.mount('.player-actions', 组件)  —— 不需要自己 createElement/appendChild
+   *   ctx.ui.mount(hostEl, 组件)  —— 不需要自己 createElement/appendChild
+   * 三处容器都要贴上（同一时间只可能看到一处）：
+   *   - 主界面播放栏右侧 `.player-actions`
+   *   - **歌词页底栏右侧 `.lyric-bar .bar-right`**（深色底：宿主样式里
+   *     `.lyric-bar .bar-right button { color:#ffffff80 !important }` 会自动把它刷成白色，
+   *     所以只要挂进 `.bar-right`，配色天然融入）
+   *   - 迷你播放器（需 manifest.runtime.miniPlayer，当前未开，留着以后用）
    * 重渲染兜底：宿主原地重渲会把我们塞进去的节点抹掉，dom.observe 不会为「同一个元素」再回调，
    * 所以额外用 MutationObserver（防抖）+ 1.5s 轮询把按钮补回来。
    */
-  function ensureBarButton() {
-    if (!barEnabled || typeof document === 'undefined' || typeof document.querySelector !== 'function') return
-    const host = document.querySelector('.player-actions') || document.querySelector('.player-bar')
-    if (!host || typeof host.querySelector !== 'function') return
-    if (host.querySelector('.sd-bar-btn')) return
-    if (typeof barMountDispose === 'function') {
+  const BAR_HOST_GROUPS = [
+    // [组名, 候选选择器（取第一个命中的）]
+    ['player', ['.player-actions', '.player-bar']],
+    ['lyric', ['.lyric-bar .bar-right', '.lyric-bar .bar-song-actions', '.lyric-bar']],
+    ['mini', ['.mini-card .mini-actions', '.mini-card']]
+  ]
+  const barMounts = new Map() // 组名 → { sel, dispose }
+
+  function queryHost(sel) {
+    try {
+      return typeof document !== 'undefined' && typeof document.querySelector === 'function' ? document.querySelector(sel) : null
+    } catch {
+      return null
+    }
+  }
+
+  function ensureBarButtons() {
+    if (!barEnabled) return
+    for (const [group, selectors] of BAR_HOST_GROUPS) {
+      let host = null
+      let sel = ''
+      for (const candidate of selectors) {
+        const el = queryHost(candidate)
+        if (el && typeof el.querySelector === 'function') {
+          host = el
+          sel = candidate
+          break
+        }
+      }
+      const rec = barMounts.get(group)
+      if (!host) {
+        // 容器不在（例如没打开歌词页）：把这一组残留的挂载收掉
+        if (rec) {
+          try {
+            rec.dispose()
+          } catch {
+            /* 忽略 */
+          }
+          barMounts.delete(group)
+        }
+        continue
+      }
+      const present = !!host.querySelector('.sd-bar-btn')
+      if (rec && rec.sel === sel) {
+        if (present) continue // 我挂的还在位
+        // 我挂的被宿主重渲抹掉了 → 往下走，重挂一个
+      } else if (!rec && present) {
+        // 别人已经挂过了（例如同一页面的另一个插件实例）→ 不重复挂
+        continue
+      }
+      if (rec) {
+        try {
+          rec.dispose()
+        } catch {
+          /* 忽略 */
+        }
+        barMounts.delete(group)
+      }
       try {
-        barMountDispose()
+        const dispose = ctx.ui && typeof ctx.ui.mount === 'function' ? ctx.ui.mount(host, PlayerBarButton) : null
+        if (typeof dispose === 'function') {
+          barMounts.set(group, { sel, dispose })
+          log('已挂载下载按钮：' + group + ' → ' + sel)
+        }
+      } catch (e) {
+        log('挂载下载按钮失败', sel, e)
+      }
+    }
+  }
+
+  function teardownBarButtons() {
+    for (const [group, rec] of [...barMounts.entries()]) {
+      try {
+        rec.dispose()
       } catch {
         /* 忽略 */
       }
-    }
-    barMountDispose = null
-    try {
-      const dispose = ctx.ui && typeof ctx.ui.mount === 'function' ? ctx.ui.mount(host, PlayerBarButton) : null
-      barMountDispose = typeof dispose === 'function' ? dispose : null
-      log('已挂载播放栏下载按钮')
-    } catch (e) {
-      log('挂载播放栏按钮失败', e)
+      barMounts.delete(group)
     }
   }
 
@@ -2881,7 +3042,7 @@ export async function activate(ctx) {
     if (barEnsureTimer || !barEnabled) return
     barEnsureTimer = setTimeout(() => {
       barEnsureTimer = null
-      ensureBarButton()
+      ensureBarButtons()
     }, 180)
   }
 
@@ -2889,11 +3050,23 @@ export async function activate(ctx) {
     barEnabled = !!enabled
     if (barEnabled) {
       if (!barObserveDispose && ctx.dom && typeof ctx.dom.observe === 'function') {
-        try {
-          const dispose = ctx.dom.observe('.player-actions', () => ensureBarButton())
-          barObserveDispose = typeof dispose === 'function' ? dispose : null
-        } catch (e) {
-          log('监听播放栏失败', e)
+        const disposers = []
+        for (const sel of ['.player-actions', '.lyric-bar', '.player-bar']) {
+          try {
+            const dispose = ctx.dom.observe(sel, () => ensureBarButtons())
+            if (typeof dispose === 'function') disposers.push(dispose)
+          } catch (e) {
+            log('监听容器失败', sel, e)
+          }
+        }
+        barObserveDispose = () => {
+          for (const dispose of disposers) {
+            try {
+              dispose()
+            } catch {
+              /* 忽略 */
+            }
+          }
         }
       }
       if (!barMutation && typeof MutationObserver === 'function') {
@@ -2907,20 +3080,13 @@ export async function activate(ctx) {
       }
       if (!barTimer) {
         barTimer = setInterval(() => {
-          if (barEnabled) ensureBarButton()
+          if (barEnabled) ensureBarButtons()
         }, 1500)
       }
-      ensureBarButton()
+      ensureBarButtons()
       return true
     }
-    if (typeof barMountDispose === 'function') {
-      try {
-        barMountDispose()
-      } catch {
-        /* 忽略 */
-      }
-    }
-    barMountDispose = null
+    teardownBarButtons()
     if (typeof barObserveDispose === 'function') {
       try {
         barObserveDispose()
@@ -3179,7 +3345,7 @@ export async function activate(ctx) {
     currentTrack,
     readQueue,
     toNormalized,
-    ensureBarButton,
+    ensureBarButtons,
     applyTaskCenter,
     syncCenterTask,
     centerHandles,

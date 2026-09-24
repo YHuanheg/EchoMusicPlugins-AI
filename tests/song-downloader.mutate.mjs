@@ -40,7 +40,7 @@ const MUTANTS = [
   },
   {
     name: '候选地址不剔除图片（封面 URL 混进来后会把 jpg 当歌曲存盘）',
-    from: `  const audio = out.filter((u) => !isImage(u))`,
+    from: `  const audio = filterAudioUrls(out)`,
     to: `  const audio = out.slice()`
   },
   {
@@ -128,9 +128,9 @@ const MUTANTS = [
   {
     name: '确认框的音质选择被忽略（用设置里的旧值去下载）',
     from: `    const quality = dlg.quality
-    const useHandle = dlg.destination === 'picker' ? saveHandleRef : null`,
+    const wantPicker = dlg.destination === 'picker'`,
     to: `    const quality = state.settings.quality
-    const useHandle = dlg.destination === 'picker' ? saveHandleRef : null`
+    const wantPicker = dlg.destination === 'picker'`
   },
   {
     name: '「记住这些选项」失效（勾了也不写回设置）',
@@ -148,8 +148,8 @@ const MUTANTS = [
   },
   {
     name: '播放栏按钮不做去重（重复回调会挂出第二个按钮）',
-    from: `    if (host.querySelector('.sd-bar-btn')) return`,
-    to: `    if (false) return`
+    from: `        if (present) continue // 我挂的还在位`,
+    to: `        if (false) continue`
   },
   {
     name: '去掉播放栏重渲染兜底（宿主重渲一次按钮就永远消失）',
@@ -158,10 +158,10 @@ const MUTANTS = [
   },
   {
     name: '关掉播放栏开关时不卸载（按钮留在界面上，开关变成摆设）',
-    from: `    barMountDispose = null
+    from: `    teardownBarButtons()
     if (typeof barObserveDispose === 'function') {`,
-    to: `    barMountDispose = null
-    if (false) {`
+    to: `    void 0
+    if (typeof barObserveDispose === 'function') {`
   },
   {
     name: '设置里切播放栏开关不生效',
@@ -313,6 +313,51 @@ const MUTANTS = [
       dismissAllCenterTasks()`,
     to: `    if (!centerEnabled) {
       void 0`
+  },
+  {
+    name: 'auto 时不借宿主解析通道（只能自己请求，风控账号下就下不了没在播的歌）',
+    from: `  if (hostAllowed && wantAuto) {`,
+    to: `  if (false) {`
+  },
+  {
+    name: '自己请求被风控拦下后不借宿主通道救（少了最后一层兜底）',
+    from: `  if (hostAllowed && !wantAuto && needsVerify && !verifyCanceled) {`,
+    to: `  if (false) {`
+  },
+  {
+    name: '用户取消了验证还去弹宿主的验证窗（连弹两次，用户会炸）',
+    from: `  if (hostAllowed && !wantAuto && needsVerify && !verifyCanceled) {`,
+    to: `  if (hostAllowed && !wantAuto && needsVerify) {`
+  },
+  {
+    name: '宿主解析抛异常时不吞（下载直接崩在解析器上）',
+    from: `  } catch (e) {
+    log('宿主解析失败，回退自己请求', (e && e.message) || String(e))
+    return null
+  }`,
+    to: `  } catch (e) {
+    throw e
+  }`
+  },
+  {
+    name: '歌词页底栏不挂下载按钮（用户报的问题）',
+    from: `    ['lyric', ['.lyric-bar .bar-right', '.lyric-bar .bar-song-actions', '.lyric-bar']],`,
+    to: `    ['lyric', []],`
+  },
+  {
+    name: '歌词页按钮挂在整个底栏而不是右侧动作区（位置/间距都不对）',
+    from: `    ['lyric', ['.lyric-bar .bar-right', '.lyric-bar .bar-song-actions', '.lyric-bar']],`,
+    to: `    ['lyric', ['.lyric-bar']],`
+  },
+  {
+    name: '不检查容器里是否已有按钮（同一排挂出两个下载按钮）',
+    from: `      } else if (!rec && present) {`,
+    to: `      } else if (false) {`
+  },
+  {
+    name: '卸载时不清空挂载表（关掉开关按钮还在）',
+    from: `    for (const [group, rec] of [...barMounts.entries()]) {`,
+    to: `    for (const [group, rec] of []) {`
   }
 ]
 

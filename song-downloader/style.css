@@ -846,3 +846,18 @@
   display: block;
   pointer-events: none;
 }
+
+/* 歌词页底栏（深色背景）：宿主的 `.lyric-bar .bar-right button{color:#ffffff80!important}` 会接管配色，
+   这里只兜住「没命中 .bar-right、降级挂在 .lyric-bar 下」的情况。 */
+.lyric-bar .sd-bar-btn {
+  color: rgba(255, 255, 255, 0.62);
+}
+
+.lyric-bar .sd-bar-btn:hover:not(:disabled) {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.lyric-bar .sd-bar-btn:disabled {
+  opacity: 0.28;
+}
