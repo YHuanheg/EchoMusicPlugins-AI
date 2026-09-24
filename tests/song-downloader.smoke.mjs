@@ -2289,6 +2289,89 @@ async function main() {
   batchApi.removeTask(batchTasks[1])
   eq(batchCtx.records.taskHandles[0].calls.dismiss, 1, '歌都被移除后父条目也被摘掉')
 
+  /* -------------------------------------------------- 32. 进度条连续（不一顿一顿） */
+  section('32. 进度条连续性：外推平滑 + 单调 + 自适应分片')
+  // ① 自适应分片：小文件切小一点（至少 ~24 次更新），但绝不超过用户设置
+  eq(I.adaptiveChunkSize(1024 * 1024, 1024 * 1024), 256 * 1024, '1MB 文件 → 256KB 分片（而不是 1 片）')
+  eq(I.adaptiveChunkSize(24 * 1024 * 1024, 1024 * 1024), 1024 * 1024, '24MB 文件 → 就用用户设置的 1MB')
+  eq(I.adaptiveChunkSize(240 * 1024 * 1024, 1024 * 1024), 1024 * 1024, '大文件不会超过用户设置')
+  eq(I.adaptiveChunkSize(2 * 1024 * 1024, 4 * 1024 * 1024), Math.ceil((2 * 1024 * 1024) / 24) < 256 * 1024 ? 256 * 1024 : Math.ceil((2 * 1024 * 1024) / 24), '分片永不超过用户设置的上限')
+
+  // ② 外推平滑：真实进度不变时，显示的进度要自己往前走
+  const smoothTask = {
+    id: 'smooth-1',
+    status: 'downloading',
+    loaded: 1000,
+    total: 100000,
+    speed: 2000, // 2000 B/s
+    chunkBytes: 5000,
+    progressAt: Date.now() - 1000 // 上一次真实更新在 1 秒前
+  }
+  const shown1 = apiOut.smoothLoaded(smoothTask)
+  ok(shown1 > 1000, '两次真实更新之间按速度外推（条会自己走）', { shown1 })
+  ok(shown1 <= 1000 + 5000 * 0.9 + 1, '外推幅度封顶在一个分片以内（不撒谎）', { shown1 })
+
+  // ③ 单调不减：速度估计掉下来时也不能往回跳
+  const shown2 = apiOut.smoothLoaded({ ...smoothTask, speed: 1, progressAt: Date.now() })
+  ok(shown2 >= shown1, '速度掉了也不回退（进度条不能倒退）', { shown1, shown2 })
+
+  // ④ 不该外推的情况
+  ok(apiOut.smoothLoaded({ ...smoothTask, total: 0 }) === 1000, '没有总大小 → 老老实实用真实值')
+  ok(apiOut.smoothLoaded({ ...smoothTask, status: 'pending' }) === 1000, '没在下载 → 用真实值')
+  ok(apiOut.smoothLoaded({ ...smoothTask, status: 'done', loaded: 100000 }) === 100000, '完成 → 就是总大小')
+  ok(apiOut.smoothLoaded({ ...smoothTask, speed: 0 }) === 1000, '没有速度估计 → 不外推')
+
+  // ⑤ 下载中最多 99%（走到 100% 却还在动会让人以为卡住）
+  const nearlyDone = { id: 'smooth-2', status: 'saving', loaded: 100000, total: 100000, speed: 0, progressAt: 0, chunkBytes: 0 }
+  eq(apiOut.taskProgress(nearlyDone), 99, '写入阶段停在 99%')
+  eq(apiOut.taskProgress({ ...nearlyDone, status: 'done' }), 100, '真正完成才 100%')
+
+  // ⑥ 端到端：真实进度不动的时候，界面上显示的百分比确实在涨
+  first.records.currentTrack.value = FLAC_TRACK
+  apiOut.state.settings.confirmBeforeDownload = false
+  apiOut.state.settings.preferHostUrl = false
+  apiOut.state.settings.chunked = true
+  api.handler = null
+  net.mode = 'range'
+  net.failPattern = null
+  net.file = makeBytes(1024 * 1024, 97)
+  let slowTask = null
+  net.calls.length = 0
+  net.beforeChunk = async (index) => {
+    // 每个分片都慢一点（300ms），好观察「两次真实更新之间」的平滑效果
+    if (index >= 2) await new Promise((r) => realSetTimeout(r, 300))
+  }
+  const smoothRun = (await apiOut.startDownloads([FLAC_TRACK], 'auto'))[0]
+  slowTask = smoothRun
+  const samplesSeen = []
+  for (let i = 0; i < 24; i++) {
+    await new Promise((r) => realSetTimeout(r, 60))
+    if (!slowTask || slowTask.status !== 'downloading') break
+    if (!(slowTask.loaded > 0)) continue
+    const treeNow = renderOf(page)
+    const node = findByProp(treeNow, 'data-task', slowTask.id)
+    const pctText = node ? textOf(node).match(/(\d+)%/) : null
+    samplesSeen.push({ loaded: slowTask.loaded, pct: pctText ? Number(pctText[1]) : null })
+  }
+  net.beforeChunk = null
+  await waitFor(() => smoothRun.status === 'done' || smoothRun.status === 'failed', '平滑观察任务收敛')
+  eq(smoothRun.status, 'done', '观察任务本身正常完成')
+  // 1MB 文件按 1MiB 设置切只会切 1 片（进度只有 1 跳）→ 自适应应该切成 256KB（≥4 片）
+  ok(net.calls.length >= 5, '小文件被切成更多片（片多才有足够多的真实更新）', { calls: net.calls.length, chunkBytes: smoothRun.chunkBytes })
+  eq(smoothRun.chunkBytes, 256 * 1024, '实际分片 = 256KB')
+  const grewWhileRealStill = samplesSeen.some((s, i) => i > 0 && s.pct !== null && samplesSeen[i - 1].pct !== null && s.loaded === samplesSeen[i - 1].loaded && s.pct > samplesSeen[i - 1].pct)
+  const compact = samplesSeen.map((s) => s.loaded + '→' + s.pct + '%')
+  ok(grewWhileRealStill, '真实进度没变时，显示的百分比也在涨（条是连续的）', { samples: compact.slice(0, 16) })
+  const neverBack = samplesSeen.every((s, i) => i === 0 || s.pct === null || samplesSeen[i - 1].pct === null || s.pct >= samplesSeen[i - 1].pct)
+  ok(neverBack, '采样期间百分比从不回退', { samples: compact.slice(0, 16) })
+
+  // ⑦ CSS 契约：进度条要有与之匹配的线性过渡（否则每跳还是「一顿」）
+  const cssText = fs.readFileSync(process.env.SD_CSS_ENTRY || path.join(ROOT, 'song-downloader', 'style.css'), 'utf8')
+  const fillRule = /\.sd-bar-fill\s*\{[^}]*\}/.exec(cssText)
+  ok(!!fillRule, '找得到 .sd-bar-fill 规则')
+  includes(fillRule ? fillRule[0] : '', 'transition', '.sd-bar-fill 有过渡')
+  includes(fillRule ? fillRule[0] : '', 'linear', '过渡是 linear（与快心跳同周期，首尾相接才连续）')
+
   /* -------------------------------------------------- 25. dispose 回收 */
   section('25. dispose 回收在跑的任务与全局监听')
   net.mode = 'range'

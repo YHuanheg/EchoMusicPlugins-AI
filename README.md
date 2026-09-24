@@ -263,7 +263,7 @@ tests/tag-filter.mutate.mjs   变异测试（把关键行为改回 bug，确认�
 
 # 歌曲下载（`song-downloader`）
 
-> 当前版本 **1.5.0** · 需要 EchoMusic **≥ 2.3.2-beta.2**
+> 当前版本 **1.5.1** · 需要 EchoMusic **≥ 2.3.2-beta.2**
 
 把「当前播放」或「播放队列」里的歌下载到本地：**正在播放的那首直接复用宿主已解析好的播放地址**
 （0 次上游请求、不触发风控），**下载前弹确认框**选音质 / 保存位置 / 文件名，
@@ -294,13 +294,14 @@ tests/tag-filter.mutate.mjs   变异测试（把关键行为改回 bug，确认�
 | 风控（「本次请求需要验证」）**必须插件自己接** | 宿主不会替插件兜底：要把 `ssaCode` 拿去 `ctx.kugouVerification.request()` 唤起安全验证弹窗，通过后原样重试一次；同一轮只弹一次，否则逐档音质会连弹三次 |
 | **风控账号下最稳的路：复用宿主已解析的地址** | 宿主播放器走 `Q.get('/song/url')`（自带验证兜底），插件 IPC 通道没有兜底。既然宿主已经把当前曲目解好了，直接读 `ctx.stores.player.currentAudioUrl` 下载：不发请求、不碰风控，而且就是播放器正在用的那条地址 |
 | 任务进度要进「任务中心」就走 `ctx.tasks.register`，**别做 DOM 注入** | 宿主给插件开了正式接口（标题栏面板 id `tasks`），面板读 `progress.percent` 画进度条、`progress.label` 显示文案、`actions` 给按钮。两个硬约束：**`retention` 必填**（漏了 register 直接抛），**收尾必须 `finish(status)`**（只有它排自动收起定时器 + abort signal） |
+| 进度条要「连续」：两次真实更新之间按速度**外推**，单调不减、最多提前一个分片 | 分片下载只有片边界才更新一次真实进度，所以中间必须外推（否则就是一顿一顿）。三条约束：单调不减（速度估计抖动不能倒退）、外推封顶一个分片（不撒谎）、**行内百分比只能有一个来源**（徽标与进度条各算一套会互相打架） |
 | 进度显示不许骗人：拿不到总大小就**不给百分比** | 关分片 / 服务端不给 `Content-Length` 时整段都算不出百分比 —— 显示 0% 会被当成卡死。插件页画「不确定进度条」，任务中心则省略 `progress.percent`（宿主面板就不画条了）。速度用 4 秒滑动平均，剩余时间只在「有总大小 + 速度>0」时给 |
 | 没在播的歌也要地址 → 借 `ctx.stores.player.resolveAudioUrl(track)` | 它就是宿主播放器的解析器：**只解析不播放**（不写 `currentAudioUrl`、不切歌），但走宿主自己的 API 层，**自带风控验证兜底** —— 插件 IPC 通道没有的那层，借它就有了 |
 | 「选择位置」必须**先解析、再弹保存对话框** | `showSaveFilePicker()` 一确认就先建出 0 字节文件；顺序反了，解析失败（风控/无版权）就会在磁盘上留一堆 0 KB 残骸（1.1.0 的真实反馈，1.1.1 修） |
 
 ```
-tests/song-downloader.smoke.mjs    无头集成测试（真实 Vue 3 ESM + mock ctx + 真实 Range 语义的假 CDN）430/430 通过
-tests/song-downloader.mutate.mjs   变异测试（把关键行为改回 bug，确认断言有效）                      59/59 被抓到
+tests/song-downloader.smoke.mjs    无头集成测试（真实 Vue 3 ESM + mock ctx + 真实 Range 语义的假 CDN）451/451 通过
+tests/song-downloader.mutate.mjs   变异测试（把关键行为改回 bug，确认断言有效）                      66/66 被抓到
 ```
 
 测试里假 CDN **真实实现 Range 语义**，所以能断言「拼装后的字节与源文件逐字节一致」；

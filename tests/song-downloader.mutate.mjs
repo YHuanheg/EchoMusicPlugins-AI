@@ -50,7 +50,7 @@ const MUTANTS = [
   },
   {
     name: '分片下载路径被短路（永远一次性下载，进度与速度消失）',
-    from: `  if (status === 206 && total > 0 && total > chunkSize) {`,
+    from: `  if (status === 206 && total > 0 && total > adaptive) {`,
     to: `  if (false) {`
   },
   {
@@ -361,8 +361,8 @@ const MUTANTS = [
   },
   {
     name: '总大小未知时返回 0（进度条卡在 0%，看着像卡死）',
-    from: `    if (!task.total) return task.status === 'done' ? 100 : null`,
-    to: `    if (!task.total) return task.status === 'done' ? 100 : 0`
+    from: `    if (!task.total) return null`,
+    to: `    if (!task.total) return 0`
   },
   {
     name: '速度用瞬时值（数字乱跳、剩余时间乱飞）',
@@ -407,6 +407,56 @@ const MUTANTS = [
       (t) => t.status === 'pending' || t.status === 'downloading' || t.status === 'resolving' || t.status === 'saving'
     )`,
     to: `    const all = state.tasks.filter((t) => t.status === 'downloading' || t.status === 'resolving' || t.status === 'saving')`
+  },
+  {
+    name: '进度不插值（只有分片边界才跳一次 —— 用户报的「一顿一顿」）',
+    from: `    const shown = smoothLoaded(task)`,
+    to: `    const shown = task.loaded`
+  },
+  {
+    name: '插值不保证单调（速度估计一抖进度条就往回跳）',
+    from: `    value = Math.max(value, Math.min(prev, total))`,
+    to: `    value = Math.min(value, total)`
+  },
+  {
+    name: '插值不封顶（能一路外推到 99%，实际还在半路）',
+    from: `      value = Math.min(extrapolated, real + lead, total)`,
+    to: `      value = Math.min(extrapolated, total)`
+  },
+  {
+    name: '下载中就给到 100%（条停在 100% 还在跑，像卡死）',
+    from: `    return Math.min(99, Math.max(0, Math.round((shown / task.total) * 100)))`,
+    to: `    return Math.min(100, Math.max(0, Math.round((shown / task.total) * 100)))`
+  },
+  {
+    name: '状态徽标自己按真实字节算百分比（与进度条各说一套）',
+    from: `      const pct = taskProgress(task)
+      return pct === null ? '下载中…' : '下载中 ' + pct + '%'`,
+    to: `      const pct = task.total ? Math.floor((task.loaded / task.total) * 100) : null
+      return pct === null ? '下载中…' : '下载中 ' + pct + '%'`
+  },
+  {
+    name: '分片不按文件大小自适应（小文件只切 1~2 片，进度只有一两跳）',
+    from: `  const adaptive = adaptiveChunkSize(total, chunkSize)`,
+    to: `  const adaptive = chunkSize`
+  },
+  {
+    name: '进度条去掉线性过渡（每跳之间硬切，看起来还是一顿一顿）',
+    file: 'css',
+    from: `.sd-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--color-primary, #4f7cff), color-mix(in srgb, var(--color-primary, #4f7cff) 55%, #22d3ee));
+  /* 与 200ms 的快心跳同周期、linear（而不是 ease）：每跳之间首尾相接，
+     看起来才是连续运动；ease 会在每个分片末尾减速，反而显得一顿一顿 */
+  transition: width 200ms linear;
+}`,
+    to: `.sd-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--color-primary, #4f7cff), color-mix(in srgb, var(--color-primary, #4f7cff) 55%, #22d3ee));
+  transition: none;
+}`
   }
 ]
 

@@ -493,6 +493,17 @@ function extractUrls(payload) {
   return audio
 }
 
+/**
+ * 分片大小：目标「至少 ~24 次进度更新」，同时**永不大于用户设置**（大文件仍按用户设置走）。
+ * 为什么要自适应：小文件按 1 MiB 切只有两三片 → 进度条只有 2~3 跳，用户看到的就是「一顿一顿」。
+ */
+function adaptiveChunkSize(total, chunkSize) {
+  const max = clamp(num(chunkSize, MIN_CHUNK_BYTES), MIN_CHUNK_BYTES, MAX_CHUNK_BYTES)
+  const t = num(total, 0)
+  if (!(t > 0)) return max
+  return clamp(Math.ceil(t / 24), MIN_CHUNK_BYTES, max)
+}
+
 /** 剔除图片地址并去重（封面混进候选会把 jpg 当歌曲存盘）—— 宿主给回来的地址列表也要过一遍 */
 function filterAudioUrls(list) {
   const out = []
@@ -944,8 +955,10 @@ async function downloadFromUrl(ctx, url, o) {
     return { ok: true, parts: [firstPart], total: firstPart.byteLength, viaChunked: false }
   }
 
-  if (status === 206 && total > 0 && total > chunkSize) {
-    return chunkedLoop(ctx, url, total, chunkSize, o, maxRetries, log)
+  // 自适应分片：小文件别只切两三片（那样进度只有 2~3 跳）
+  const adaptive = adaptiveChunkSize(total, chunkSize)
+  if (status === 206 && total > 0 && total > adaptive) {
+    return chunkedLoop(ctx, url, total, adaptive, o, maxRetries, log)
   }
 
   // 206 但整包比一个分片还小 → 一次性拿全更省事
@@ -976,13 +989,13 @@ async function chunkedLoop(ctx, url, total, chunkSize, o, maxRetries, log) {
       if (bytes.byteLength < total) {
         return { ok: false, error: '服务端中途忽略了 Range（返回 ' + bytes.byteLength + ' 字节 / 需要 ' + total + '）' }
       }
-      if (o.onProgress) o.onProgress({ loaded: bytes.byteLength, total: bytes.byteLength })
+      if (o.onProgress) o.onProgress({ loaded: bytes.byteLength, total: bytes.byteLength, chunkBytes: 0 })
       return { ok: true, parts: [bytes], total: bytes.byteLength, viaChunked: false }
     }
     if (!bytes.byteLength) return { ok: false, error: '分片 ' + start + '-' + end + ' 返回空内容' }
     parts.push(bytes)
     loaded += bytes.byteLength
-    if (o.onProgress) o.onProgress({ loaded, total })
+    if (o.onProgress) o.onProgress({ loaded, total, chunkBytes: chunkSize })
   }
   if (loaded !== total) return { ok: false, error: '下载字节数不匹配（' + loaded + ' / ' + total + '）' }
   return { ok: true, parts, total, viaChunked: true }
@@ -1183,9 +1196,18 @@ export async function activate(ctx) {
     history: Array.isArray(savedHistory) ? savedHistory.slice(0, MAX_HISTORY) : [],
     selected: {},
     notice: '',
-    beat: 0,
+    beat: 0, // 时间显示用的心跳（500ms 级）
+    tick: 0, // 进度插值用的快心跳（200ms 级，只在下载中递增）
     resolved: null // { trackId, quality, count, url, at }
   })
+
+  /**
+   * 已显示过的最大进度（taskId → 字节）。
+   * 为什么需要它：进度条只有「每下载完一个分片」才有一次真实更新，中间完全静止 ——
+   * 用户看到的就是「一顿一顿」。所以两次真实更新之间按当前速度**外推**一个平滑值，
+   * 并且**单调不减**（速度估计抖动时不能往回跳），外推幅度封顶在「一个分片」以内（不撒谎）。
+   */
+  const shownLoaded = new Map()
 
   /**
    * 下载确认框的状态。
@@ -1238,9 +1260,12 @@ export async function activate(ctx) {
 
   function startHeartbeat() {
     if (heartbeat) return
+    // 200ms：时间显示够用，也让平滑进度有足够的重渲染频率（配合 CSS transition 看起来是连续的）
     heartbeat = setInterval(() => {
-      if (hasActiveTasks()) state.beat += 1
-    }, 500)
+      if (!hasActiveTasks()) return
+      state.beat += 1
+      if (state.tasks.some((t) => t.status === 'downloading')) state.tick += 1
+    }, 200)
   }
 
   function pushHistory(entry) {
@@ -1268,6 +1293,8 @@ export async function activate(ctx) {
       loaded: 0,
       total: 0,
       speed: 0,
+      progressAt: 0, // 上一次真实进度更新的时间戳（平滑外推用）
+      chunkBytes: 0, // 本次下载实际使用的分片大小（外推幅度封顶 = 它的 90%）
       startedAt: 0,
       endedAt: 0,
       attempts: 0,
@@ -1293,6 +1320,8 @@ export async function activate(ctx) {
   function patch(task, fields) {
     if (!task) return
     Object.assign(task, fields)
+    // 记下「真实进度」的时刻：平滑外推的起点（见 smoothLoaded）
+    if (fields && 'loaded' in fields) task.progressAt = Date.now()
     syncCenterTask(task)
   }
 
@@ -1643,7 +1672,7 @@ export async function activate(ctx) {
         log,
         onProgress: (p) => {
           const speed = pushSpeedSample(speedSamples, p.loaded)
-          patch(task, { loaded: p.loaded, total: p.total, speed })
+          patch(task, { loaded: p.loaded, total: p.total, speed, chunkBytes: num(p.chunkBytes, task.chunkBytes) })
         }
       }
 
@@ -1882,6 +1911,7 @@ export async function activate(ctx) {
     if (!task) return
     const idx = state.tasks.findIndex((x) => x.id === task.id)
     if (idx >= 0) state.tasks.splice(idx, 1)
+    shownLoaded.delete(task.id)
     if (task.group) {
       // 批量任务：重算父条目（最后一首被移除时父条目自动消失）
       syncCenterGroup(task.group)
@@ -1897,6 +1927,7 @@ export async function activate(ctx) {
       const s = task.status
       if (s === 'done' || s === 'failed' || s === 'canceled') {
         state.tasks.splice(i, 1)
+        shownLoaded.delete(task.id)
         if (task.group) groups.add(task.group)
         else dismissCenterTask(task.id)
       }
@@ -2073,7 +2104,12 @@ export async function activate(ctx) {
   function statusText(task) {
     if (task.status === 'pending') return '排队中'
     if (task.status === 'resolving') return '解析地址…'
-    if (task.status === 'downloading') return task.total ? '下载中 ' + Math.floor((task.loaded / task.total) * 100) + '%' : '下载中…'
+    if (task.status === 'downloading') {
+      // 必须用 taskProgress（平滑 + 封 99%）：否则徽标显示真实字节算的整数百分比，
+      // 与进度条/箭头文案各说一套，看起来就是「一顿一顿」（真机反馈）
+      const pct = taskProgress(task)
+      return pct === null ? '下载中…' : '下载中 ' + pct + '%'
+    }
     if (task.status === 'saving') return '写入文件…'
     if (task.status === 'done') return task.saveMethod === 'picker' ? '已保存' : '已交给下载器'
     if (task.status === 'canceled') return '已取消'
@@ -2089,13 +2125,51 @@ export async function activate(ctx) {
   }
 
   /**
+   * 平滑后的「已下载」字节数。
+   *
+   * 进度只有「一个分片下完」才真实更新一次，所以两次更新之间按当前速度外推，
+   * 并且满足三条约束（否则就是骗人）：
+   *   ① **单调不减** —— 速度估计抖动时不能往回跳（用户最烦的就是进度条倒退）；
+   *   ② **外推幅度封顶**在「本次分片大小的 90%」以内 —— 最多比真实进度提前不到一个分片；
+   *   ③ 不超过总大小；任务结束/未开始/没有总大小时一律用真实值。
+   */
+  function smoothLoaded(task) {
+    const total = num(task.total, 0)
+    const real = num(task.loaded, 0)
+    if (task.status === 'done') {
+      shownLoaded.delete(task.id)
+      return total || real
+    }
+    if (task.status !== 'downloading' || !(total > 0)) {
+      shownLoaded.delete(task.id)
+      return real
+    }
+    const prev = num(shownLoaded.get(task.id), 0)
+    let value = real
+    const speed = num(task.speed, 0)
+    const at = num(task.progressAt, 0)
+    const lead = Math.min(num(task.chunkBytes, 0) * 0.9, total - real)
+    if (speed > 0 && at > 0 && lead > 0) {
+      const extrapolated = real + (speed * Math.max(0, Date.now() - at)) / 1000
+      value = Math.min(extrapolated, real + lead, total)
+    }
+    value = Math.max(value, Math.min(prev, total))
+    shownLoaded.set(task.id, value)
+    return value
+  }
+
+  /**
    * 进度百分比。
    * ⚠️ 拿不到总大小时返回 **null**（而不是 0）—— 否则「没开分片 / 服务端不给 Content-Length」
    * 的任务会整段显示 0%，看起来像卡死了。UI 见到 null 就画不确定进度条。
+   * ⚠️ 下载中最多显示 99%：进度条走到 100% 却还在动，会让人以为卡住。
    */
   function taskProgress(task) {
-    if (!task.total) return task.status === 'done' ? 100 : null
-    return Math.min(100, Math.max(0, Math.round((task.loaded / task.total) * 100)))
+    void state.tick // 平滑进度依赖快心跳驱动重渲染
+    if (task.status === 'done') return 100
+    if (!task.total) return null
+    const shown = smoothLoaded(task)
+    return Math.min(99, Math.max(0, Math.round((shown / task.total) * 100)))
   }
 
   /**
@@ -2153,7 +2227,7 @@ export async function activate(ctx) {
       (t) => t.status === 'pending' || t.status === 'downloading' || t.status === 'resolving' || t.status === 'saving'
     )
     const active = all.filter((t) => t.status !== 'pending')
-    const loaded = all.reduce((a, t) => a + num(t.loaded, 0), 0)
+    const loaded = all.reduce((a, t) => a + smoothLoaded(t), 0)
     const total = all.reduce((a, t) => a + num(t.total, 0), 0)
     const speed = all.reduce((a, t) => a + num(t.speed, 0), 0)
     const finished = all.filter((t) => t.status === 'done' || t.status === 'failed' || t.status === 'canceled').length
@@ -2387,8 +2461,8 @@ export async function activate(ctx) {
           'span',
           { class: 'sd-muted' },
           taskSizeText(task) +
-            (pct !== null && active ? ' · ' + pct + '%' : '') +
             (task.status === 'downloading' && task.speed > 0 ? ' · ' + formatSpeed(task.speed) : '') +
+            (task.status === 'downloading' && taskEtaMs(task) > 0 ? ' · 剩余约 ' + formatSeconds(taskEtaMs(task)) : '') +
             (task.status === 'done' ? ' · ' + formatBytes(task.bytes) + (task.viaChunked ? ' · 分片' : '') : '')
         ),
         h('span', { class: 'sd-muted' }, taskTimeText(task))
@@ -3564,6 +3638,8 @@ export async function activate(ctx) {
     centerGroups,
     centerLabel,
     taskProgress,
+    smoothLoaded,
+    shownLoaded,
     taskEtaMs,
     taskSizeText,
     pushSpeedSample,
@@ -3607,6 +3683,7 @@ export const __internals = {
   parseTotalFromContentRange,
   headerGet,
   looksLikeImageBytes,
+  adaptiveChunkSize,
   formatBytes,
   formatSpeed,
   formatSeconds,
