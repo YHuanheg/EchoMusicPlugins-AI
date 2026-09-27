@@ -12,6 +12,19 @@
 
 const STORAGE_KEY = 'gh-accelerator-settings'
 const STATS_KEY = 'gh-accelerator-stats'
+const RESULTS_KEY = 'gh-accelerator-results'
+
+/**
+ * 测速结果的展示有效期。
+ *
+ * 结果会持久化，这样重启主程序后线路列表**立刻**就有延迟可看 ——
+ * 否则会出现自相矛盾的状态：`lastTestAt` 被持久化了、于是「进入本页自动测速」判定为
+ * 「刚测过」而跳过，但结果列表又是空的，用户看到一片「未测速」，还点不出「应用最快」。
+ *
+ * 但不能无限期沿用：公益线路的可用性变化很快（实测同一批线路 8 天后排名就完全不同），
+ * 过期就丢弃、逼一次真实测量。
+ */
+const RESULTS_TTL_MS = 6 * 60 * 60 * 1000
 
 /** 连通性测试目标：任意 GitHub 主机下的小文件即可 */
 const DEFAULT_PROBE_URL =
@@ -498,6 +511,15 @@ export async function activate(ctx) {
    * 对某条线路做一次「真实下载」测量：通过该线路取一个真实 GitHub 文件，
    * 同时得到可达性、耗时与实际吞吐。这比 ping 站点根目录更贴近真实体验。
    */
+  /**
+   * 测一条线路。
+   *
+   * ⚠️ 同一次测量会同时给出两个指标，**取决于目标文件大小该用哪个**：
+   *   - `latencyMs`（= 耗时）：目标是**小文件**时只有它有意义 —— 拿一个 4 KB 的文件算
+   *     `bytes/elapsed` 会得出「3 KB/s」这种荒谬数字（除以的其实是 RTT，不是带宽）。
+   *   - `kbps`：只有目标是**大文件**（吞吐测试）时才有意义。
+   * 所以一键测速存 `latencyMs`，吞吐测试存 `kbps`，两者分桶存放、不要互相覆盖。
+   */
   async function measureSource(source, targetUrl, options = {}) {
     const timeoutMs = options.timeoutMs ?? state.settings.timeoutMs
     const maxBytes = options.maxBytes ?? 4 * 1024 * 1024
@@ -520,20 +542,22 @@ export async function activate(ctx) {
       const statusOk = response.status >= 200 && response.status < 400
 
       if (!statusOk) {
-        return { ok: false, elapsedMs, bytes, status: response.status, error: `HTTP ${response.status}` }
+        return { ok: false, elapsedMs, latencyMs: elapsedMs, bytes, status: response.status, error: `HTTP ${response.status}` }
       }
       if (bytes <= 0) {
-        return { ok: false, elapsedMs, bytes, status: response.status, error: '响应为空' }
+        return { ok: false, elapsedMs, latencyMs: elapsedMs, bytes, status: response.status, error: '响应为空' }
       }
       return {
         ok: true,
         elapsedMs,
+        latencyMs: elapsedMs,
         bytes,
         status: response.status,
         kbps: bytes / 1024 / (elapsedMs / 1000)
       }
     } catch (error) {
-      return { ok: false, elapsedMs: Date.now() - startedAt, error: describeError(error) }
+      const elapsedMs = Math.max(1, Date.now() - startedAt)
+      return { ok: false, elapsedMs, latencyMs: elapsedMs, error: describeError(error) }
     }
   }
 
@@ -547,7 +571,20 @@ export async function activate(ctx) {
     customSources: [],
     excludeMatchers: [],
     stats: { ...EMPTY_STATS },
-    results: {}, // sourceId -> { ok, elapsedMs, kbps, bytes, error }
+    /**
+     * sourceId → 一键测速结果 `{ ok, latencyMs, bytes, status, error }`。
+     * 目标是小文件，**指标是延迟**（小文件的 bytes/耗时不是带宽）。
+     */
+    results: {},
+    /**
+     * sourceId → 吞吐测试结果 `{ ok, kbps, bytes, elapsedMs, status, error }`。
+     * 目标是大文件，**指标是带宽**。与 `results` 分桶存放：
+     * 早前两者共用 `results`，吞吐测试会把延迟值直接覆盖掉。
+     */
+    throughput: {},
+    /** 两批测量各自的产生时间（持久化用；前者决定重启后能否直接展示） */
+    resultsAt: 0,
+    throughputAt: 0,
     testing: false,
     testDone: 0,
     testTotal: 0,
@@ -614,15 +651,26 @@ export async function activate(ctx) {
     return String(store?.githubProxyUrl ?? '').trim()
   })
 
-  /** 已测速且可用的线路，按吞吐降序、耗时升序 */
+  /**
+   * 已测速且可用的线路。
+   *
+   * 排序规则：**已测吞吐的按吞吐降序排在前面**（吞吐更贴近真实下载体验 ——
+   * 加速地址主要用来拉安装包 / 插件 zip），其余按延迟升序。
+   * 以延迟兜底是因为：一键测速打的是小文件，小文件上只有延迟是可信指标，
+   * 拿它的 bytes/耗时当带宽会得出「3 KB/s」这种荒谬值。
+   */
   const rankedSources = computed(() => {
+    const hasThroughput = (s) => state.throughput[s.id]?.ok === true
     return allSources.value
       .filter((s) => state.results[s.id]?.ok)
       .sort((a, b) => {
-        const ra = state.results[a.id]
-        const rb = state.results[b.id]
-        if (rb.kbps !== ra.kbps) return rb.kbps - ra.kbps
-        return ra.elapsedMs - rb.elapsedMs
+        const ta = hasThroughput(a)
+        const tb = hasThroughput(b)
+        if (ta !== tb) return ta ? -1 : 1
+        if (ta && tb) return state.throughput[b.id].kbps - state.throughput[a.id].kbps
+        const la = state.results[a.id]?.latencyMs ?? Number.MAX_SAFE_INTEGER
+        const lb = state.results[b.id]?.latencyMs ?? Number.MAX_SAFE_INTEGER
+        return la - lb
       })
   })
 
@@ -710,6 +758,12 @@ export async function activate(ctx) {
         customSources: state.customSources.map((s) => ({ ...s }))
       })
       await ctx.storage.set(STATS_KEY, { ...state.stats })
+      await ctx.storage.set(RESULTS_KEY, {
+        results: { ...state.results },
+        resultsAt: state.resultsAt,
+        throughput: { ...state.throughput },
+        throughputAt: state.throughputAt
+      })
     } catch (error) {
       log('持久化失败', error)
     }
@@ -722,9 +776,70 @@ export async function activate(ctx) {
     state.excludeMatchers = compileExcludeMatchers(state.settings.excludeList)
   }
 
+  /**
+   * 恢复上次的测速结果（仅限有效期内）。
+   *
+   * 只收「形状看起来还对」的条目，避免旧版本遗留的数据把界面带歪；
+   * 两个桶各自判有效期，因为延迟测得很勤、吞吐测得很少。
+   */
+  function applyLoadedResults(saved) {
+    const now = Date.now()
+    const isFresh = (at) => Number.isFinite(at) && at > 0 && now - at < RESULTS_TTL_MS
+    const sanitize = (bucket) => {
+      const out = {}
+      if (bucket && typeof bucket === 'object') {
+        for (const [id, value] of Object.entries(bucket)) {
+          if (value && typeof value === 'object' && typeof value.ok === 'boolean') out[id] = value
+        }
+      }
+      return out
+    }
+    const resultsAt = Number(saved?.resultsAt) || 0
+    if (isFresh(resultsAt)) {
+      state.results = sanitize(saved?.results)
+      state.resultsAt = resultsAt
+    }
+    const throughputAt = Number(saved?.throughputAt) || 0
+    if (isFresh(throughputAt)) {
+      state.throughput = sanitize(saved?.throughput)
+      state.throughputAt = throughputAt
+    }
+  }
+
   /* ------------------------------------------------------------------ */
   /* 业务动作                                                            */
   /* ------------------------------------------------------------------ */
+
+  /**
+   * 让宿主用「当前的加速地址」跑一次更新检查。
+   *
+   * 这是验证线路端到端可用的最直接手段：它走的是宿主**真实的更新链路**
+   * （`settings.checkForUpdates` → IPC `check-for-updates`，并把 `githubProxyUrl` 一起传下去），
+   * 比插件自己测速更贴近用户实际会遇到的情况。
+   *
+   * 该 action 不在公开文档里（asar 核验其在 settings store 上，签名 `checkForUpdates(silent)`），
+   * 所以先做存在性探测，缺了给明确文案而不是静默失败。
+   */
+  async function triggerHostUpdateCheck() {
+    const store = hostSettingsStore()
+    if (typeof store?.checkForUpdates !== 'function') {
+      toast('warning', '当前 EchoMusic 版本不支持从插件触发检查更新')
+      return { ok: false, error: '宿主未提供 checkForUpdates' }
+    }
+    try {
+      // 参数是 silent：传 false 让宿主把检查过程与结果展示出来
+      await store.checkForUpdates(false)
+      toast(
+        'info',
+        hostProxyUrl.value ? '已通过当前加速地址检查更新' : '已检查更新（当前未设置加速地址，走直连）'
+      )
+      return { ok: true }
+    } catch (error) {
+      const message = describeError(error)
+      toast('danger', `检查更新失败：${message}`)
+      return { ok: false, error: message }
+    }
+  }
 
   async function runSpeedTest() {
     if (state.testing) return
@@ -751,6 +866,8 @@ export async function activate(ctx) {
     state.testing = false
     state.stats.lastTestAt = Date.now()
     state.stats.lastTestCount = targets.length
+    // 记下这一批结果的产生时间：结果会被持久化，重启后据此判断是否还能直接展示
+    state.resultsAt = Date.now()
     scheduleSave()
 
     const available = targets.filter((s) => state.results[s.id]?.ok).length
@@ -771,7 +888,8 @@ export async function activate(ctx) {
       timeoutMs: Math.max(state.settings.timeoutMs, 15000),
       maxBytes: limit
     })
-    state.results[source.id] = result
+    state.throughput[source.id] = result
+    state.throughputAt = Date.now()
     state.testingIds = {}
     state.testing = false
     scheduleSave()
@@ -1280,24 +1398,41 @@ export async function activate(ctx) {
 
   function renderSourceRow(source) {
     const result = state.results[source.id]
+    const tp = state.throughput[source.id]
     const isTesting = !!state.testingIds[source.id]
     const isActive =
       source.kind === 'ghproxy' && trimSlash(hostProxyUrl.value) === trimSlash(source.domain)
 
     const dotClass = isTesting ? 'gha-dot gha-dot-busy' : result ? (result.ok ? 'gha-dot gha-dot-ok' : 'gha-dot gha-dot-bad') : 'gha-dot'
 
+    /*
+     * 一键测速打的是小文件 ⇒ **只有延迟是可信指标**，直接用 ms 展示。
+     * 早前这里显示 `bytes/耗时` 并标成 KB/s，而探测文件只有 4 KB，
+     * 实际会显示「3 KB/s」这种把人吓一跳的假数字（除以的其实是 RTT，不是带宽）。
+     */
+    const latencyMs = result?.ok ? Math.round(result.latencyMs ?? result.elapsedMs ?? 0) : 0
+
     let metricText = '未测速'
     let metricClass = 'gha-metric'
+    let metricTitle = ''
     if (isTesting) metricText = '测试中…'
     else if (result) {
       if (result.ok) {
-        metricText = formatKbps(result.kbps)
+        metricText = `${latencyMs} ms`
+        metricTitle = `响应延迟 ${latencyMs} ms · 探测文件 ${formatBytes(result.bytes)}`
         metricClass = 'gha-metric gha-metric-good'
       } else {
         metricText = result.error || '不可用'
+        metricTitle = result.error || ''
         metricClass = 'gha-metric gha-metric-bad'
       }
     }
+
+    // 吞吐单独一列：只有跑过吞吐测试的线路才有
+    const throughputText = tp?.ok ? formatKbps(tp.kbps) : ''
+    const throughputTitle = tp?.ok
+      ? `吞吐 ${formatKbps(tp.kbps)} · 大文件 ${formatBytes(tp.bytes)} / ${tp.elapsedMs}ms`
+      : ''
 
     const badges = []
     if (source.kind === 'xget') {
@@ -1333,10 +1468,13 @@ export async function activate(ctx) {
           'span',
           {
             class: metricClass,
-            title: result && result.ok ? `${formatBytes(result.bytes)} / ${result.elapsedMs}ms` : ''
+            title: metricTitle
           },
           metricText
         ),
+        throughputText
+          ? h('span', { class: 'gha-metric gha-metric-throughput', title: throughputTitle }, throughputText)
+          : null,
         renderButton(icon(ICON_GAUGE, 13), () => void runThroughputTest(source), {
           small: true,
           disabled: state.testing,
@@ -1460,6 +1598,11 @@ export async function activate(ctx) {
                 disabled: state.testing || !bestProxy.value
               }),
               renderButton('清空加速地址', () => void handleClear()),
+              renderButton('用当前加速源检查更新', () => void triggerHostUpdateCheck(), {
+                title:
+                  '让宿主用当前的「GitHub 加速地址」跑一次更新检查 —— ' +
+                  '它走的是宿主真实的更新链路，比插件自测更接近实际使用场景'
+              }),
               h(
                 'div',
                 {
@@ -1486,6 +1629,12 @@ export async function activate(ctx) {
               )
             ])
           ]),
+          h(
+            'p',
+            { class: 'gha-hero-note' },
+            '「一键测速」打的是小文件，所以列出的是响应延迟（越小越好）；想看真实下载速度，' +
+              '点线路右侧的仪表按钮单独跑一次吞吐测试 —— 跑过的线路会同时显示吞吐，并优先参与排序。'
+          ),
 
           /* Xget 本地加速 */
           h('section', { class: 'gha-card' }, [
@@ -2492,10 +2641,18 @@ export async function activate(ctx) {
         return { tone: 'on', text: '加速已启用', hint: '' }
       })
 
+      /**
+       * 当前线路的指标文案：优先吞吐（跑过吞吐测试才有），否则回落到延迟。
+       * 不再用小文件的 bytes/耗时冒充带宽。
+       */
       const activeSpeed = computed(() => {
         const id = activeLine.value && activeLine.value.id
-        const result = id ? state.results[id] : null
-        return result && result.ok ? formatKbps(result.kbps) : ''
+        if (!id) return ''
+        const tp = state.throughput[id]
+        if (tp?.ok) return `${formatKbps(tp.kbps)} 吞吐`
+        const result = state.results[id]
+        if (result?.ok) return `${Math.round(result.latencyMs ?? result.elapsedMs ?? 0)} ms 延迟`
+        return ''
       })
 
       /** 刷新进度条主体：只在开关打开时渲染，空闲且无历史时不占位 */
@@ -2631,11 +2788,14 @@ export async function activate(ctx) {
   }
 
   try {
-    const [saved, savedStats] = await Promise.all([
+    const [saved, savedStats, savedResults] = await Promise.all([
       ctx.storage.get(STORAGE_KEY),
-      ctx.storage.get(STATS_KEY)
+      ctx.storage.get(STATS_KEY),
+      ctx.storage.get(RESULTS_KEY)
     ])
     applyLoaded(saved?.settings, saved?.customSources, savedStats)
+    // 恢复上次的测速结果：否则重启后会出现「自动测速被跳过、列表却全是未测速」的矛盾状态
+    applyLoadedResults(savedResults)
   } catch (error) {
     log('读取配置失败，使用默认值', error)
     applyLoaded(null, [], null)
@@ -2958,15 +3118,29 @@ export async function activate(ctx) {
     abortMarketplaceTracking()
   }
 
-  ctx.commands.register('run-speed-test', () => void runSpeedTest())
-  ctx.commands.register('apply-fastest', async () => {
-    const target = pickProxySource()
-    if (!target) {
-      toast('warning', '请先测速')
-      return
-    }
-    const outcome = await applyToHost(target)
-    toast(outcome.ok ? 'success' : 'warning', outcome.ok ? `已应用线路：${target.name}` : outcome.error)
+  /*
+   * 命令的第三参 `{ title }` 是宿主支持的（asar 核验：`register:(e,n,r)=>…title:r?.title`），
+   * 它会被用在运行期错误归因文案「插件命令: <title>」里 —— 不传就只能显示裸 id。
+   */
+  ctx.commands.register('run-speed-test', () => void runSpeedTest(), {
+    title: 'GitHub 加速器：全线路测速'
+  })
+  ctx.commands.register(
+    'apply-fastest',
+    async () => {
+      const target = pickProxySource()
+      if (!target) {
+        toast('warning', '请先测速')
+        return
+      }
+      const outcome = await applyToHost(target)
+      toast(outcome.ok ? 'success' : 'warning', outcome.ok ? `已应用线路：${target.name}` : outcome.error)
+    },
+    { title: 'GitHub 加速器：应用最快线路' }
+  )
+  // 返回 promise 而不是 void：调用方（命令面板 / 测试）能 await 到结果
+  ctx.commands.register('check-updates', () => triggerHostUpdateCheck(), {
+    title: 'GitHub 加速器：通过当前加速源检查更新'
   })
 
   ctx.dispose(() => {
