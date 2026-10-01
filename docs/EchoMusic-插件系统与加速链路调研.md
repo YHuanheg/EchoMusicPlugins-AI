@@ -310,10 +310,12 @@ Xget 的 `gh` 前缀对应的是 **`github.com` 的网页路径结构**，直接
 | ❌ 超时 | 4 | `ghfast.top`、`ghproxy.it`、`github.moeyy.xyz`、`gh.llkk.cc` |
 | ❌ 失败 | 8 | `github.akams.cn`、`gh.jasonzeng.dev`、`fastly.jsdelivr.net`、`raw.ihtw.moe`(DNS)、`cors.isteed.cc`(404) 等 |
 
+> 📌 **2026-10-01 复核标注**：上表是 2026-09-19 的实测快照，**排名与可用性均已漂移**。2026-09-27 复测：24 条里 22 条仍可用（`ghproxy.monkeyray.net` 返回 404、`gh.ddlc.top` 返回 429）；09-19 的最快线路 `wget.la` 已退到 6022 ms，当前最快是 `gh-proxy.org` 768 ms。另外「按延迟排最快」这个口径本身已被 v1.3.0 改掉 —— 4 KB 探针的「字节 / 耗时」是 RTT 不是带宽，必须区分「延迟 ms」与「吞吐」。原文保留仅为留证据链。
+
 **结论**：
 
 1. 本插件原来的 6 条预置里有 4 条已失效 —— 静态清单一定会腐坏，**必须保留运行时实测排序**；
-2. 从这份清单里可以补充到 24 条可用节点，比原预置多 20 条，选择性大幅提升；
+2. 从这份清单里可以补充到 24 条可用节点，比原预置多 **22 条**（原 6 条预置里 4 条已失效，仅存 2 条；2026-10-01 复核更正：原文写「20 条」，与本条第 1 点的「4 条已失效」自相矛盾），选择性大幅提升；
 3. XIU2 脚本里的 `download_url_us` 特意做「每次随机 6 个美国节点」以分散压力，
    并在说明里请用户优先用美国节点 —— 这是公益节点能活下去的关键。插件的「负载均衡」选项采纳了同样思路。
 
@@ -378,7 +380,7 @@ $s = async (url, options) => (await getSession()).fetch(url instanceof URL ? url
 
 ### 4.3 备选：云端桥（不改插件也生效）
 
-在 Xget 的 Cloudflare Pages 项目里加一个 catch-all Function（见 `docs/xget-bridge/`）：
+在 Xget 的 Cloudflare Pages 项目里加一个 catch-all Function（见 `./xget-bridge/`）：
 
 - 只拦截 `/{http(s)://...}` 这种 gh-proxy 形态的请求；
 - 解析后按平台换算成 Xget 的规范路径，**302 重定向**过去；

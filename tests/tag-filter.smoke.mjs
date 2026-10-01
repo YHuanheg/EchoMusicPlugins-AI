@@ -71,7 +71,6 @@ function includes(hay, needle, name) {
 async function resolveVue() {
   const candidates = [
     process.env.VUE_ESM_PATH,
-    'D:/Downloads/_wb_echo/vendor/vue.runtime.esm-browser.js',
     CACHE_VUE
   ].filter(Boolean)
 

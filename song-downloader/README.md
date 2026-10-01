@@ -397,10 +397,12 @@ $node = "$env:USERPROFILE\.workbuddy\binaries\node\versions\22.22.2-3\node.exe"
 失败不清理空文件、不复用宿主地址、丢 `audioUrl`、宿主地址失效不回退、
 漏 `retention`、跳过 `start()`、用 `update` 收尾、任务 id 用 `echo:`、不摘幽灵行、
 总大小未知时给 0、速度用瞬时值、剩余时间不看总大小、批量不合成父条目、总体进度漏掉排队任务……），
-59 个全部被测试抓到。样式类变异通过 `SD_CSS_ENTRY` 指向副本实现，不需要改仓库里的真文件。
+66 个全部被测试抓到。样式类变异通过 `SD_CSS_ENTRY` 指向副本实现，不需要改仓库里的真文件。
 
 ## 八、边界
 
+- 能力声明只有两项：`unrestrictedNetwork`（分片下载要走主进程 Axios，渲染进程直连 CDN 会被 CORS 拦）
+  与 `kugouVerification`（风控时唤起宿主的安全验证弹窗）；**不申请** `webServer`、不开本地端口；
 - 只读写自己命名空间下的 `ctx.storage`；
 - 网络请求只有两个去向：宿主内置的酷狗本地接口（`/song/url`）与歌曲 CDN 直链；
 - 不加载任何第三方代码，不上传任何数据；

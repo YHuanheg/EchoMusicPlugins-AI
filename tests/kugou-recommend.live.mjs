@@ -11,6 +11,7 @@
  * 运行： node tests/kugou-recommend.live.mjs
  */
 
+import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -18,8 +19,23 @@ const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '..')
 const PLUGIN_ENTRY = path.join(ROOT, 'kugou-recommend', 'index.js')
 
-const VUE_ESM = process.env.VUE_ESM_PATH || 'D:/Downloads/_wb_echo/vendor/vue.runtime.esm-browser.js'
-const V = await import(pathToFileURL(VUE_ESM).href)
+const CACHE_DIR = path.join(ROOT, '.workbuddy', 'tmp')
+const CACHE_VUE = path.join(CACHE_DIR, 'vue.runtime.esm-browser.js')
+const VUE_CDN = 'https://cdn.jsdelivr.net/npm/vue@3.5.13/dist/vue.runtime.esm-browser.js'
+
+async function resolveVue() {
+  const candidates = [process.env.VUE_ESM_PATH, CACHE_VUE].filter(Boolean)
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate
+  }
+  fs.mkdirSync(CACHE_DIR, { recursive: true })
+  const res = await fetch(VUE_CDN)
+  if (!res.ok) throw new Error('无法下载 Vue ESM 构建：HTTP ' + res.status + '（可设 VUE_ESM_PATH 指定本地文件）')
+  fs.writeFileSync(CACHE_VUE, Buffer.from(await res.arrayBuffer()))
+  return CACHE_VUE
+}
+
+const V = await import(pathToFileURL(await resolveVue()).href)
 
 const GATEWAY = 'https://gateway.kugou.com/youth/v1/recommend/channel_wander'
 

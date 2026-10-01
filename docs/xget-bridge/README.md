@@ -57,6 +57,7 @@ curl -sI 'https://<你的 Xget 域名>/gh/hoowhoami/EchoMusic/raw/main/docs/plug
 ## 实现要点
 
 - **只拦截 `/{http(s)://...}` 形态**，其余请求原样 `next()` 放行，不碰 Xget 原有路由；
+  具体判据见 `functions/[[path]].js`：路径不匹配即放行，且**只处理 `GET` / `HEAD`**，其余方法直接 `next()`；
 - 用 **302 重定向**而非反向代理：不改动 Xget 的响应头、`Cache-Control`、Range 与流式语义，
   宿主（Axios / Electron net）都会跟随重定向；
 - 路径重写复用了与插件一致的规则，包括 `raw.githubusercontent.com` → `github.com/.../raw/...`、

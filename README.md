@@ -6,10 +6,14 @@
 > 插件**开发侧**的知识（宿主 API 与能力契约、上游载荷归一化、宿主 DOM 契约、无头测试与变异测试方法、
 > 发布与敏感信息清理流程）不进这个仓库 —— 它维护在开发者的本地插件开发技能包里，
 > 避免同一份知识在仓库与技能里各写一份、然后两边逐渐不一致。
+> `docs/` 下是**已冻结的时间点快照**（调研与 asar 核验记录，留着当证据链），不是现行知识，
+> 不随宿主版本更新；其中的结论若与本仓库其它文件冲突，以 `AGENTS.md` 与插件目录为准。
 
 ```
 .
 ├─ echo-plugins.json                  # EchoMusic 插件源索引（推到 GitHub 后可在线安装）
+├─ AGENTS.md                          # 维护/开发视角的规范、命令与约束（面向 AI 代理与贡献者）
+├─ LICENSE                            # MIT
 ├─ gh-accelerator/                    # 插件：GitHub 加速器
 │  ├─ manifest.json
 │  ├─ index.js                        # 纯 ESM 单文件，无构建步骤
@@ -21,16 +25,19 @@
 ├─ tag-filter/                        # 插件：插件标签筛选（给插件面板加标签筛选条）
 ├─ song-downloader/                   # 插件：歌曲下载（当前播放 / 播放队列 → 本地）
 ├─ tests/                             # 无头集成测试 + 真实网络冒烟 + 变异测试
+│  ├─ gh-accelerator.smoke.mjs       # mock ctx + 假本地桥，144 项断言
+│  ├─ kugou-daily-vip.smoke.mjs      # mock ctx + 假签到响应，93 项断言
 │  ├─ kugou-recommend.smoke.mjs      # 真实 Vue 3 ESM + mock ctx，275 条断言
 │  ├─ kugou-recommend.live.mjs       # 打真实网关，验证上游形态确实能解析
 │  ├─ tag-filter.smoke.mjs           # 仿真宿主 DOM，382 条断言
 │  ├─ tag-filter.mutate.mjs          # 标签筛选的变异测试（26 个变异）
-│  ├─ song-downloader.smoke.mjs      # mock ctx + 真实 Range 语义的假 CDN，173 条断言
-│  ├─ song-downloader.mutate.mjs     # 歌曲下载的变异测试（12 个变异）
+│  ├─ song-downloader.smoke.mjs      # mock ctx + 真实 Range 语义的假 CDN，451 条断言
+│  ├─ song-downloader.mutate.mjs     # 歌曲下载的变异测试（66 个变异）
 │  └─ mutate-check.mjs               # 把关键行为改回 bug，确认测试真的会失败
-└─ docs/
+└─ docs/                                   # 时点快照：留档核验数据，不随宿主版本更新
+   ├─ EchoMusic-v2.3.2-beta.6-技术分析.md   # beta.6 的宿主 asar 核验数据
    ├─ EchoMusic-插件系统与加速链路调研.md   # 调研 + 实测数据 + 设计决策
-   └─ xget-bridge/                        # 可选：让Xget 兼容宿主格式的 Pages Function
+   └─ xget-bridge/                         # 可选：让Xget 兼容宿主格式的 Pages Function
       ├─ functions/[[path]].js
       └─ README.md
 ```
@@ -127,7 +134,8 @@ node tests/mutate-check.mjs
 
 # GitHub 加速器（`gh-accelerator`）
 
-> 当前版本 **1.1.0**（新增：在线插件页刷新进度 / 数量 / 速率）
+> 当前版本 **1.3.0**（新增：测速口径区分「延迟」与「吞吐」、测速结果持久化 6 小时、
+> 「用当前加速源检查更新」按钮；修正重启后测速状态自相矛盾的 bug）
 
 为宿主的**更新检查**与**在线插件市场下载**挑选最快的 GitHub 加速线路，并提供 Xget 多平台链接转换。
 
@@ -157,6 +165,10 @@ Xget 更快、支持 20+ 平台，但属于**路径重写**形态，直接填入
 想改用公共 gh-proxy 镜像：等自动测速完成，在 gh-proxy 分组里点最快那条右侧的 ⬆。
 
 ## 实测数据（2026-09-19，本机）
+
+> **2026-09-27 复测**：24 条预置线路里 **22 条仍可用**（`monkeyray.net` 返回 404、`gh.ddlc.top` 返回 429）；
+> 排名漂移剧烈 —— 09-19 记录的最快线路 `wget.la` 已退到 6022 ms，**当前最快是 `gh-proxy.org` 768 ms**。
+> 下表是 09-19 的快照，仅作证据链留存。
 
 线路可用性差异极大，**这就是必须实测排序、不能硬编码默认线路的原因**：
 
@@ -209,7 +221,7 @@ Xget 更快、支持 20+ 平台，但属于**路径重写**形态，直接填入
 - 一键把最快线路写入宿主 `githubProxyUrl`，写入后回读校验
 - 单条线路吞吐测速，区分「能连通」与「真的快」
 - 自定义线路增删（gh-proxy / Xget 两种形态）
-- **24 条实测可用的公益加速源**，带地区标签；可选「负载均衡」在最快 4 条里随机，避免打挂单个节点
+- **24 条预置公益加速源**，带地区标签（2026-09-27 复测 22 条仍可用）；可选「负载均衡」在最快 4 条里随机，避免打挂单个节点
 - 单条与批量链接转换，一键复制
 - 排除规则（正则 / 字面量）
 - 统计面板与完整设置项（并发、超时、测速文件、体积上限、桥端口、调试日志）
@@ -319,6 +331,14 @@ tests/song-downloader.mutate.mjs   变异测试（把关键行为改回 bug，�
 - 不采集、不上传任何用户数据；
 - EchoMusic 插件不是浏览器沙盒，安装第三方插件前请自行确认来源可信。
 
+## 参与开发
+
+本仓库没有构建步骤、没有依赖：克隆下来直接改 `index.js` / `style.css` / `manifest.json` 即可，
+在仓库根目录跑 `node tests/<插件>.smoke.mjs` 验证。
+
+改代码前请先读 [`AGENTS.md`](AGENTS.md) —— 里面是版本号规则、测试要求、发布流程与已知陷阱；
+插件开发所需的宿主 API、能力契约与 DOM 契约不在本仓库维护，见该文件第 9 节。
+
 ## 许可
 
-MIT。
+MIT，全文见 [`LICENSE`](LICENSE)。

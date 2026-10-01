@@ -2,6 +2,7 @@
 
 为 **EchoMusic** 的更新检查与在线插件市场下载挑选最快的 GitHub 加速线路，并提供多平台链接转换。
 
+- **版本**：`1.3.0`
 - **插件 id**：`gh-accelerator`
 - **最低主程序版本**：EchoMusic `>= 2.3.0`
 - **能力声明**：`unrestrictedNetwork`（线路测速需要主进程 Axios，绕开渲染进程 CORS）、`webServer`（Xget 本地桥）

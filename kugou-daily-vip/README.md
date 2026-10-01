@@ -155,7 +155,13 @@
 **广告倒计时（渲染 / 秒数递减 / 起手等于配置间隔 / 结束自动隐藏）**、
 **真机结构校正（完整日期解析 / svip 业务线挑选 / 升级失败判为中性）**。
 
-测试脚本：`D:/Downloads/_wb_echo/kdv_smoke.mjs`（真实插件代码 + 真实 Vue 3 ESM 运行时 + mock ctx）。
+测试脚本：`tests/kugou-daily-vip.smoke.mjs`（真实插件代码 + 真实 Vue 3 ESM 运行时 + mock ctx）。
+
+```bash
+node tests/kugou-daily-vip.smoke.mjs
+# 想验证「改坏了会红」：把改过的副本指给 KDV_PLUGIN_ENTRY 即可复用同一套断言
+KDV_PLUGIN_ENTRY=/path/to/mutated/index.js node tests/kugou-daily-vip.smoke.mjs
+```
 
 ### 测试侧踩过的坑（给后续维护者）
 
