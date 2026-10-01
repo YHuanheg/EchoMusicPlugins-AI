@@ -22,6 +22,7 @@
 │  └─ README.md
 ├─ kugou-daily-vip/                   # 插件：概念版每日领VIP
 ├─ kugou-recommend/                   # 插件：推荐电台（多源音乐推荐）
+├─ playlist-importer/                 # 插件：歌单导入增强（其他平台歌单 → EchoMusic）
 ├─ tag-filter/                        # 插件：插件标签筛选（给插件面板加标签筛选条）
 ├─ song-downloader/                   # 插件：歌曲下载（当前播放 / 播放队列 → 本地）
 ├─ tests/                             # 无头集成测试 + 真实网络冒烟 + 变异测试
@@ -29,6 +30,9 @@
 │  ├─ kugou-daily-vip.smoke.mjs      # mock ctx + 假签到响应，93 项断言
 │  ├─ kugou-recommend.smoke.mjs      # 真实 Vue 3 ESM + mock ctx，275 条断言
 │  ├─ kugou-recommend.live.mjs       # 打真实网关，验证上游形态确实能解析
+│  ├─ playlist-importer.smoke.mjs    # 真实 Vue 3 ESM + mock ctx + 脚本化本地路由，505 条断言
+│  ├─ playlist-importer.mutate.mjs   # 歌单导入增强的变异测试（48 个变异）
+│  ├─ playlist-importer.live.mjs     # 打真实网易云 / QQ 音乐 / 酷我，验证归一化
 │  ├─ tag-filter.smoke.mjs           # 仿真宿主 DOM，382 条断言
 │  ├─ tag-filter.mutate.mjs          # 标签筛选的变异测试（26 个变异）
 │  ├─ song-downloader.smoke.mjs      # mock ctx + 真实 Range 语义的假 CDN，451 条断言
@@ -49,6 +53,7 @@
 | **GitHub 加速器** | `gh-accelerator` | 为宿主的更新检查与在线插件下载挑选最快线路，把Xget 接进来，并在在线插件页显示加速状态与刷新进度 | [README](gh-accelerator/README.md) |
 | **概念版每日领VIP** | `kugou-daily-vip` | 每天自动领取酷狗概念版畅听 VIP（听歌 + 广告 + 签到） | [README](kugou-daily-vip/README.md) |
 | **推荐电台** | `kugou-recommend` | 八源音乐推荐：频道漫游 / 每日推荐 / 猜你喜欢 / 曲风 / AI / 新歌 / 历史 / 排行 | [README](kugou-recommend/README.md) |
+| **歌单导入增强** | `playlist-importer` | 把其他音乐软件的歌单导入 EchoMusic：链接 / 本地文件 / 粘贴文本，**导入前先匹配预演可人工改选**，按 hash 去重、失败清单可导出可重试 | [README](playlist-importer/README.md) |
 | **插件标签筛选** | `tag-filter` | 给「设置 → 插件」面板加一条标签筛选条：自动聚合面板内所有插件的标签，多选实时过滤、清除筛选、空状态提示 | [README](tag-filter/README.md) |
 | **歌曲下载** | `song-downloader` | 把当前播放 / 播放队列的歌下载到本地：自动挑音质、分片下载带真实进度与速度、批量队列与历史 | [README](song-downloader/README.md) |
 
@@ -320,6 +325,71 @@ tests/song-downloader.mutate.mjs   变异测试（把关键行为改回 bug，�
 确认框走 `ctx.ui.teleport`、播放栏按钮走 `ctx.ui.mount`，两者都在假 DOM 里被真实驱动
 （挂载时机 / 去重 / 被抹掉后补挂 / 开关装卸都能测到）；另用 `watchEffect` 盯渲染结果，
 确认队列变化与任务状态变化真的驱动了界面。
+
+---
+
+# 歌单导入增强（`playlist-importer`）
+
+> 当前版本 **1.0.0** · 需要 EchoMusic **≥ 2.3.2-beta.2**（用宿主内置的酷狗本地路由）
+
+把其他音乐软件的歌单导入到 EchoMusic：**链接**、**本地文件**、**粘贴文本**三种入口，
+导入前先做**匹配预演**（每首列出候选与分数，可以人工改选 / 跳过 / 单条重试），确认之后才写入酷狗云歌单。
+
+```
+① 选择来源     链接（网易云 / QQ 音乐 / 酷我 / 酷狗 / Spotify / 汽水）
+               本地文件（JSON / CSV / TXT / M3U / M3U8，可拖入）
+               粘贴文本（每行「歌名 - 歌手」，也可直接粘 CSV / JSON）
+      ↓
+② 归一化       全部落成同一个模型 { 歌单名, 作者, 封面, tracks[{标题,歌手,专辑,时长}] }
+      ↓
+③ 匹配预演     逐首搜索 GET /search，三因子打分 → 已匹配 / 低置信 / 未匹配
+               表格里可人工改选候选 · 跳过 · 单条重试      ← 这一步不写任何数据
+      ↓
+④ 去重         批内（歌曲级 key 折叠）+ 目标歌单已有（读一次目标歌单 hash 列表）
+      ↓
+⑤ 写入         新建歌单 POST /playlist/add → 分批（50 首/批）POST /playlist/tracks/add
+      ↓
+⑥ 反馈         任务中心进度与停止 · 汇总 · 失败清单导出 CSV / JSON · 只重试失败项 · 复制诊断
+```
+
+**为什么还需要这个插件**：EchoMusic 侧边栏本来就内置了「导入外部歌单」（链接 + 截图 OCR）。
+但那套是**一键黑盒** —— 匹配过程不可见、低置信结果无法干预、不支持本地歌单文件、失败清单拿不出来。
+本插件补的正是这几块（链接导入作为入口保留，但复用同一套「读取 → 预演 → 导入」链路）。
+
+| 能力 | 宿主内置 | 本插件 |
+| --- | --- | --- |
+| 链接导入（7 个平台） | ✅ | ✅（可手动指定平台） |
+| 截图 OCR 导入 | ✅ | ❌ |
+| **本地歌单文件导入** | ❌ | ✅ JSON / CSV / TXT / M3U / M3U8 |
+| **匹配预演 + 人工改选** | ❌ | ✅ 每首列候选与分数，可改选 / 跳过 / 单条重试 |
+| **失败清单导出 / 只重试失败项** | ❌ | ✅ CSV / JSON |
+
+> **落点事实**：EchoMusic 本地库（`echomusic.sqlite`）只有 `app_kv` / `play_history` /
+> `playback_queues` / `queue_items` / `songs` 五张表，**没有本地歌单表** ——
+> 所以「歌单」就是**酷狗云端歌单**，导入结果会出现在「音乐库 → 我创建的歌单」里。
+
+四个关键工程决策（详见 [`playlist-importer/README.md`](playlist-importer/README.md)）：
+
+| 决策 | 为什么 |
+| --- | --- |
+| `data` 参数是 `歌名\|hash\|albumId\|mixSongId` 逗号拼接的**复合串**，所以歌名里的 `,` `\|` 必须先清洗 | 上游模块 `playlist_tracks_add.js` 就是 `split(',')` + `split('\|')` 解析的；不清洗的话一首歌的名字会把后面所有字段错位（这是协议格式，不是转义问题） |
+| 时长未知时**重新分配权重**，而不是当 0 分 | 网易云导出、TXT、CSV 都常常没有时长；把缺失项当 0 会直接把大量正常匹配压到阈值以下。同时「任一边未知 → 中性 0.5」而不是 0（歌手字段缺失同理） |
+| 去重身份用**歌曲级** `mixSongId`（缺失退回 `hash`），不是文件级 `hash` | 同一首歌常有多个音质对应不同 hash；只按 hash 去重会出现「好几条一模一样的歌」 |
+| 读本地文件刻意**不申请 `localFiles`** | 走 `<input type=file>` + `File.text()`，与宿主自己导入截图时是同一条路。能力最小化 |
+| 搜索只对**网络层失败**重试（`502 + error_code=0`） | 酷狗的业务错误一定带非零 `error_code`；对业务拒绝重试只会徒增风控风险 |
+| 风控兜底**一整轮只弹一次**验证窗 | 否则逐关键词/逐首都会弹，用户以为插件坏了 |
+
+```
+tests/playlist-importer.smoke.mjs    无头集成测试（真实 Vue 3 ESM + mock ctx + 脚本化本地路由）505/505 通过
+tests/playlist-importer.mutate.mjs   变异测试（把关键行为改回 bug，确认断言有效）                48/48 被抓到
+tests/playlist-importer.live.mjs     真实网络冒烟（网易云 200 首 / QQ 音乐 30 首 / 酷我 337 首）26/26 通过
+```
+
+测试用**脚本化的本地路由**驱动完整链路（解析 → 匹配 → 人工改选 → 分批导入 → 汇总），
+并用 `watchEffect` 盯渲染结果确认界面真的更新了（不需要"切页再切回来"）；
+另装了一个 `setInterval` 哨兵，把「插件不该留定时器」变成一条断言。
+真实网络冒烟守的是夹具证明不了的那件事：**上游真实响应能不能被归一化成可用的曲目**
+（没有「未知歌曲」、没有 `[object Object]` 泄漏、没有把毫秒当时长）。
 
 ---
 

@@ -1,0 +1,548 @@
+/*
+ * 歌单导入增强 (playlist-importer) —— 样式
+ *
+ * 三种容器的滚动约定不同，判错一次就要返工（技能 references/30-ui-containers.md#UI-01）：
+ *   插件页（.plugin-page-host 只裁剪、自身不滚动） → 插件**自己**滚：
+ *       根节点 height:100% + min-height:0 + overflow-y:auto + display:block（不要 flex column）
+ *   插件设置（宿主 .dialog-scroll-area 负责滚）   → 根节点**只做流式布局**，
+ *       绝不能写 height:100% / overflow-y:auto，否则自己高度=内容高度 → 谁也滚不了
+ *   浮层（ctx.ui.teleport）                      → position:fixed 遮罩 + max-height + 内部滚动
+ *
+ * 颜色一律走宿主 CSS 变量（带兜底值），深浅色 / 主题色自动跟随，不写死颜色。
+ */
+
+/* ============================ 插件页：自己滚 ============================ */
+
+.pi-page {
+  height: 100%;            /* 父级 .plugin-page-host 是 h-full，100% 可解析 */
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: block;          /* 不要 flex-direction: column —— 子项会被压扁而不是溢出 */
+  padding: 18px 22px 140px;/* 底部留白给主界面播放条 */
+  box-sizing: border-box;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--color-text-main, #888) 26%, transparent) transparent;
+  overscroll-behavior: contain;
+}
+
+.pi-page > * {
+  max-width: 1040px;
+  margin: 0 auto;
+}
+
+.pi-page > * + * {
+  margin-top: 16px;
+}
+
+/* ============================ 头部 ============================ */
+
+.pi-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.pi-title {
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--color-text-main, #1f2937);
+}
+
+.pi-sub {
+  font-size: 12px;
+  color: var(--color-text-secondary, #6b7280);
+  line-height: 1.6;
+}
+
+.pi-version {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 0.5px solid var(--control-border, rgba(0, 0, 0, 0.15));
+  color: var(--color-text-secondary, #6b7280);
+}
+
+/* ============================ 卡片 ============================ */
+
+.pi-card {
+  border: 0.5px solid var(--color-border, rgba(0, 0, 0, 0.1));
+  background: var(--color-bg-card, rgba(0, 0, 0, 0.02));
+  border-radius: var(--border-radius-lg, 12px);
+  padding: 14px 16px;
+  box-sizing: border-box;
+}
+
+.pi-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.pi-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-main, #1f2937);
+}
+
+.pi-card-hint {
+  font-size: 11px;
+  color: var(--color-text-secondary, #6b7280);
+}
+
+/* ============================ 模式 tabs ============================ */
+
+.pi-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.pi-tab {
+  padding: 5px 13px;
+  border-radius: 999px;
+  border: 0.5px solid var(--control-border, rgba(0, 0, 0, 0.15));
+  background: var(--control-bg, transparent);
+  color: var(--color-text-secondary, #6b7280);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.pi-tab:hover {
+  background: var(--control-hover-bg, rgba(0, 0, 0, 0.04));
+}
+
+.pi-tab[data-active='1'] {
+  color: var(--color-primary, #2563eb);
+  border-color: var(--color-primary, #2563eb);
+  background: color-mix(in srgb, var(--color-primary, #2563eb) 10%, transparent);
+  font-weight: 600;
+}
+
+/* ============================ 平台选择 ============================ */
+
+.pi-plats {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.pi-plat {
+  padding: 4px 11px;
+  border-radius: 8px;
+  border: 0.5px solid var(--control-border, rgba(0, 0, 0, 0.15));
+  background: var(--control-bg, transparent);
+  color: var(--color-text-secondary, #6b7280);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.pi-plat[data-active='1'] {
+  color: var(--color-primary, #2563eb);
+  border-color: var(--color-primary, #2563eb);
+  background: color-mix(in srgb, var(--color-primary, #2563eb) 10%, transparent);
+}
+
+/* ============================ 输入 ============================ */
+
+.pi-input,
+.pi-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border-radius: var(--border-radius-md, 8px);
+  border: 0.5px solid var(--control-border, rgba(0, 0, 0, 0.15));
+  background: var(--control-bg, transparent);
+  color: var(--color-text-main, #1f2937);
+  font-family: var(--font-sans, sans-serif);
+  font-size: 12.5px;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.pi-textarea {
+  min-height: 88px;
+  font-family: var(--font-mono, monospace);
+}
+
+.pi-input:focus,
+.pi-textarea:focus {
+  outline: none;
+  border-color: var(--color-primary, #2563eb);
+}
+
+.pi-file-drop {
+  border: 1px dashed var(--control-border, rgba(0, 0, 0, 0.2));
+  border-radius: var(--border-radius-md, 8px);
+  padding: 18px 14px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--color-text-secondary, #6b7280);
+  cursor: pointer;
+  background: var(--control-muted-bg, rgba(0, 0, 0, 0.02));
+}
+
+.pi-file-drop[data-over='1'] {
+  border-color: var(--color-primary, #2563eb);
+  color: var(--color-primary, #2563eb);
+}
+
+.pi-file-name {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--color-text-main, #1f2937);
+}
+
+/* ============================ 按钮 ============================ */
+
+.pi-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 14px;
+  border-radius: var(--border-radius-md, 8px);
+  border: 0.5px solid var(--control-border, rgba(0, 0, 0, 0.15));
+  background: var(--control-bg, transparent);
+  color: var(--color-text-main, #1f2937);
+  font-size: 12.5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.pi-btn:hover:not(:disabled) {
+  background: var(--control-hover-bg, rgba(0, 0, 0, 0.05));
+}
+
+.pi-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.pi-btn[data-variant='primary'] {
+  background: var(--color-primary, #2563eb);
+  border-color: var(--color-primary, #2563eb);
+  color: #fff;
+}
+
+.pi-btn[data-variant='danger'] {
+  color: var(--color-danger, #dc2626);
+  border-color: color-mix(in srgb, var(--color-danger, #dc2626) 45%, transparent);
+}
+
+.pi-btn[data-variant='ghost'] {
+  border-color: transparent;
+  color: var(--color-text-secondary, #6b7280);
+}
+
+.pi-btn-sm {
+  padding: 3px 8px;
+  font-size: 11.5px;
+}
+
+.pi-btn-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: 12px;
+}
+
+/* ============================ 开关 ============================ */
+
+.pi-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 0.5px solid var(--control-border, rgba(0, 0, 0, 0.15));
+  background: var(--control-muted-bg, rgba(0, 0, 0, 0.03));
+  color: var(--color-text-secondary, #6b7280);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.pi-switch[data-on='1'] {
+  color: var(--color-primary, #2563eb);
+  border-color: var(--color-primary, #2563eb);
+  background: color-mix(in srgb, var(--color-primary, #2563eb) 10%, transparent);
+}
+
+.pi-switch-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0.6;
+}
+
+.pi-select {
+  padding: 5px 8px;
+  border-radius: var(--border-radius-md, 8px);
+  border: 0.5px solid var(--control-border, rgba(0, 0, 0, 0.15));
+  background: var(--control-bg, transparent);
+  color: var(--color-text-main, #1f2937);
+  font-size: 12px;
+  max-width: 100%;
+}
+
+/* ============================ 进度 ============================ */
+
+.pi-progress {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--control-muted-bg, rgba(0, 0, 0, 0.08));
+  overflow: hidden;
+  margin: 10px 0 6px;
+}
+
+.pi-progress-bar {
+  height: 100%;
+  background: var(--color-primary, #2563eb);
+  border-radius: 999px;
+  transition: width 200ms linear; /* linear：与快心跳同周期，每跳首尾相接 */
+}
+
+/* 不确定进度条：拿不到总数时用，不要显示 0%（会被当成卡死） */
+.pi-progress[data-indeterminate='1'] .pi-progress-bar {
+  width: 34%;
+  animation: pi-sweep 1.15s ease-in-out infinite;
+}
+
+@keyframes pi-sweep {
+  0% { margin-left: -34%; }
+  100% { margin-left: 100%; }
+}
+
+.pi-progress-label {
+  font-size: 11.5px;
+  color: var(--color-text-secondary, #6b7280);
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+/* ============================ 步骤条 ============================ */
+
+.pi-stepper {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.pi-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  border: 0.5px solid var(--control-border, rgba(0, 0, 0, 0.12));
+  color: var(--color-text-secondary, #6b7280);
+}
+
+.pi-step[data-status='active'] {
+  color: var(--color-primary, #2563eb);
+  border-color: var(--color-primary, #2563eb);
+}
+
+.pi-step[data-status='done'] {
+  color: var(--color-text-main, #1f2937);
+  border-color: color-mix(in srgb, var(--color-text-main, #1f2937) 30%, transparent);
+}
+
+.pi-step-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0.55;
+}
+
+/* ============================ 预演表 ============================ */
+
+.pi-table {
+  border: 0.5px solid var(--color-border, rgba(0, 0, 0, 0.1));
+  border-radius: var(--border-radius-md, 8px);
+  overflow: hidden;
+}
+
+.pi-th,
+.pi-row {
+  display: grid;
+  grid-template-columns: 34px minmax(180px, 1.3fr) minmax(180px, 1.3fr) 96px 74px;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+.pi-th {
+  background: var(--control-muted-bg, rgba(0, 0, 0, 0.04));
+  color: var(--color-text-secondary, #6b7280);
+  font-size: 11.5px;
+}
+
+.pi-row {
+  border-top: 0.5px solid var(--color-border, rgba(0, 0, 0, 0.06));
+  color: var(--color-text-main, #1f2937);
+}
+
+.pi-row[data-status='failed'] {
+  background: color-mix(in srgb, var(--color-danger, #dc2626) 7%, transparent);
+}
+
+.pi-row[data-status='low'] {
+  background: color-mix(in srgb, var(--color-warning, #d97706) 8%, transparent);
+}
+
+.pi-row[data-status='skipped'] {
+  opacity: 0.62;
+}
+
+.pi-cell {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pi-cell-sub {
+  font-size: 11px;
+  color: var(--color-text-secondary, #6b7280);
+}
+
+.pi-idx {
+  color: var(--color-text-secondary, #6b7280);
+  font-size: 11px;
+  text-align: right;
+}
+
+/* ============================ 状态徽标 ============================ */
+
+.pi-badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  border: 0.5px solid currentColor;
+  white-space: nowrap;
+}
+
+.pi-badge[data-status='success'] { color: var(--color-primary, #2563eb); }
+.pi-badge[data-status='low'] { color: var(--color-warning, #d97706); }
+.pi-badge[data-status='failed'] { color: var(--color-danger, #dc2626); }
+.pi-badge[data-status='skipped'] { color: var(--color-text-secondary, #6b7280); }
+.pi-badge[data-status='pending'],
+.pi-badge[data-status='matching'],
+.pi-badge[data-status='adding'] { color: var(--color-text-secondary, #6b7280); }
+
+/* ============================ 汇总 / 诊断 ============================ */
+
+.pi-summary {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+  color: var(--color-text-main, #1f2937);
+}
+
+.pi-summary b {
+  font-size: 15px;
+}
+
+.pi-diag {
+  margin-top: 10px;
+  max-height: 220px;
+  overflow: auto;
+  padding: 10px;
+  border-radius: var(--border-radius-md, 8px);
+  background: var(--control-muted-bg, rgba(0, 0, 0, 0.04));
+  border: 0.5px solid var(--color-border, rgba(0, 0, 0, 0.08));
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--color-text-secondary, #6b7280);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.pi-empty {
+  padding: 22px 12px;
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--color-text-secondary, #6b7280);
+}
+
+.pi-notice {
+  margin-top: 10px;
+  padding: 8px 11px;
+  border-radius: var(--border-radius-md, 8px);
+  font-size: 12px;
+  line-height: 1.6;
+  border: 0.5px solid currentColor;
+}
+
+.pi-notice[data-level='info'] { color: var(--color-text-secondary, #6b7280); }
+.pi-notice[data-level='warn'] { color: var(--color-warning, #d97706); }
+.pi-notice[data-level='error'] { color: var(--color-danger, #dc2626); }
+.pi-notice[data-level='ok'] { color: var(--color-primary, #2563eb); }
+
+.pi-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.pi-kv {
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--color-text-secondary, #6b7280);
+}
+
+.pi-kv b {
+  color: var(--color-text-main, #1f2937);
+  font-weight: 500;
+}
+
+/* ============================ 设置面板：只做流式布局 ============================ */
+
+.pi-settings {
+  display: block; /* ← 不要 height:100%；不要 overflow-y:auto（否则设置页滚不动） */
+  padding: 2px 0 10px;
+}
+
+.pi-settings-group + .pi-settings-group {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 0.5px solid var(--color-border, rgba(0, 0, 0, 0.08));
+}
+
+.pi-settings-label {
+  font-size: 12.5px;
+  color: var(--color-text-main, #1f2937);
+  margin-bottom: 6px;
+}
+
+.pi-settings-desc {
+  font-size: 11.5px;
+  color: var(--color-text-secondary, #6b7280);
+  line-height: 1.6;
+  margin-bottom: 8px;
+}
+
+.pi-settings-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}

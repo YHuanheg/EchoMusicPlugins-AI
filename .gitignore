@@ -7,6 +7,10 @@ _*_out.txt
 _cleanup*.txt
 ls_*.txt
 
+# 测试/变异用的插件副本（必须在 .workbuddy/ 下；这条是兜底，
+# 因为 Windows 上 ESM 句柄让副本删不掉，而发布脚本会镜像插件目录）
+.*-load-*.mjs
+
 # 依赖与系统文件
 node_modules/
 Thumbs.db

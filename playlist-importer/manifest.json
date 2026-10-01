@@ -1,0 +1,21 @@
+{
+  "id": "playlist-importer",
+  "name": "歌单导入增强",
+  "version": "1.0.0",
+  "description": "把其他音乐软件的歌单导入到 EchoMusic：支持链接（网易云 / QQ 音乐 / 酷我 / 酷狗 / Spotify / 汽水）与本地文件（JSON / CSV / TXT / M3U），导入前先做匹配预演可人工改选，导入时按 hash 去重、复用目标歌单已有歌曲检测，失败清单可导出、可只重试失败项。",
+  "author": "YHuanheg",
+  "icon": "icon.svg",
+  "main": "index.js",
+  "style": "style.css",
+  "runtime": {
+    "miniPlayer": false,
+    "desktopLyric": false
+  },
+  "capabilities": {
+    "unrestrictedNetwork": true,
+    "kugouVerification": true
+  },
+  "requires": {
+    "echoMusicVersion": ">=2.3.2-beta.2"
+  }
+}

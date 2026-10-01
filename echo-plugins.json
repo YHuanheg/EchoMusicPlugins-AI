@@ -46,6 +46,22 @@
       ]
     },
     {
+      "id": "playlist-importer",
+      "path": "playlist-importer",
+      "repo": "https://github.com/YHuanheg/EchoMusicPlugins-AI",
+      "homepage": "https://github.com/YHuanheg/EchoMusicPlugins-AI/tree/main/playlist-importer",
+      "tags": [
+        "playlist",
+        "import",
+        "migration",
+        "netease",
+        "qqmusic",
+        "spotify",
+        "kugou",
+        "tool"
+      ]
+    },
+    {
       "id": "song-downloader",
       "path": "song-downloader",
       "repo": "https://github.com/YHuanheg/EchoMusicPlugins-AI",
