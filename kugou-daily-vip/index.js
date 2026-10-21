@@ -1,4 +1,4 @@
-// kugou-daily-vip v1.0.0 —— 酷狗概念版「每日自动领取 VIP」
+// kugou-daily-vip v1.2.0 —— 酷狗概念版「每日自动领取 VIP」
 //
 // 架构（与 auto-team-vip 同源，入口同为软件顶部 ⭐）：
 //   - 宿主内置了 KuGouMusicApi 本地服务（resources/server/module/*.js），
@@ -47,6 +47,7 @@ const ERR = {
 const TICK_MS = 30_000; // 跨天巡检周期（纯本地判断，不发请求）
 const STARTUP_DELAY_MS = 6_000; // 启动首查延迟（等 pinia 设备信息就绪）
 const LOGIN_DELAY_MS = 4_000; // 登录后首查延迟
+const ACCOUNT_SWITCH_DELAY_MS = 2_000; // 切换账号后重读本地状态、再判断是否补领
 const MANUAL_COOLDOWN_MS = 60_000; // 手动领取节流
 const MIN_RUN_GAP_MS = 15_000; // 两次完整流程之间的最小间隔
 const REFRESH_THROTTLE_MS = 3_000; // 「刷新」按钮节流
@@ -105,6 +106,7 @@ let lastRunStartedAt = 0;
 let lastManualAt = 0;
 let tickTimer = null;
 let stopTokenWatch = null;
+let stopAccountWatch = null;
 let startupTimers = [];
 let dialogOpen = null;
 let cssDispose = null;
@@ -186,12 +188,18 @@ function isNoQuotaReply(code, message) {
 function pickVipEntry(body) {
   const list = deepFindArray(body);
   const items = Array.isArray(list) ? list.filter((it) => it && typeof it === "object") : [];
+  // 超级VIP 与豪华VIP 是两个独立字段（beta.8 起宿主新增 super/deluxe 徽章）：
+  // `su_vip_end_time` 存在时这一条其实是「超级VIP」，只读 `vip_end_time` 会把
+  // 同时持有两档的用户挑到低一档的条目 —— 不报错，只是到期时间比徽章「低一级」。
+  const readSu = (it) => String(pick(it, ["su_vip_end_time", "super_vip_end_time", "suVipEndTime"], "")).trim();
   const read = (it) =>
-    String(pick(it, ["vip_end_time", "end_time", "vipEndTime", "expire_time", "endTime"], "")).trim();
+    readSu(it) || String(pick(it, ["vip_end_time", "end_time", "vipEndTime", "expire_time", "endTime"], "")).trim();
 
   const score = (it) => {
     const type = String(pick(it, ["product_type", "busi_type", "type", "vip_type", "product_name"], "")).toLowerCase();
     const name = String(pick(it, ["vip_name", "busi_vip_name", "name", "product_name"], ""));
+    // 超级VIP 优先级最高（-1），确保同时持有时挑中的是它
+    if (readSu(it)) return -1;
     // 畅听 / 概念版优先；tvip（听书等其它权益）降权
     if (/concept|youth|lite|concept_vip/.test(type)) return 0;
     if (/tvip|listen_book|book|audiobook/.test(type)) return 3;
@@ -211,7 +219,8 @@ function pickVipEntry(body) {
   if (main) {
     return {
       endTime: read(main.it),
-      level: String(pick(main.it, ["vip_name", "busi_vip_name", "name"], "")),
+      // 上游条目可能只带 su_vip_end_time 而不带名称，此时按字段语义补一个可读名
+      level: String(pick(main.it, ["vip_name", "busi_vip_name", "name"], "")) || (readSu(main.it) ? "超级VIP" : ""),
       others,
     };
   }
@@ -276,6 +285,20 @@ function readAuth(ctx) {
     serverDev: pick(d, ["serverDev"], ""),
     mac: pick(d, ["mac"], ""),
   };
+}
+
+// 账号维度的落盘键（技能 40#ENG-13）：
+// beta.9 起宿主支持多账号切换，`lastClaim` / `lastDoneDate` / `history` 这类
+// 「某个账号今天领过没有」的状态如果不带 userid，切到另一个账号会被静默判成
+// “今天已领”而跳过一次 —— 不报错，用户只会觉得“今天没领到”。
+// 未登录时退化为裸键，保留旧数据的可读性（登录后再按 uid 分桶）。
+function scopedKey(base, uid) {
+  const id = String(uid || "").trim();
+  return id ? `${base}:${id}` : base;
+}
+
+function accountUid(ctx) {
+  return String(readAuth(ctx)?.userid || "").trim();
 }
 
 function buildAuthHeader(auth) {
@@ -728,7 +751,7 @@ async function refreshStatus(ctx) {
 
   // 本地记录：不是今天的就清空展示，避免把昨天的结果当成今天
   if (uiState) {
-    const stored = await ctx.storage.get("lastClaim");
+    const stored = await ctx.storage.get(scopedKey("lastClaim", auth.userid));
     const todayKey = beijingDateKey();
     if (stored && stored.dateKey === todayKey) applyRecordToState(stored);
     else if (uiState.todayKey !== todayKey) {
@@ -969,10 +992,12 @@ async function finishClaim(ctx, today, { settings, aborted }) {
     uiState.history = upsertHistory(uiState.history, today);
   }
 
-  await ctx.storage.set("lastClaim", today);
-  await ctx.storage.set("history", (uiState?.history || []).slice(0, MAX_HISTORY));
+  // 所有与账号相关的键统一按 uid 分桶（技能 40#ENG-13）；未登录时退化为裸键
+  const uid = accountUid(ctx);
+  await ctx.storage.set(scopedKey("lastClaim", uid), today);
+  await ctx.storage.set(scopedKey("history", uid), (uiState?.history || []).slice(0, MAX_HISTORY));
   // 只有完整跑完才记「今天已完成」，中止/失败下轮跨天巡检仍会重试
-  if (!aborted && failed.length === 0) await ctx.storage.set("lastDoneDate", today.dateKey);
+  if (!aborted && failed.length === 0) await ctx.storage.set(scopedKey("lastDoneDate", uid), today.dateKey);
 
   if (settings.toastOnDone) {
     if (failed.length > 0) ctx.toast.warning(message);
@@ -1082,6 +1107,10 @@ function releaseRuntime() {
   if (stopTokenWatch) {
     stopTokenWatch();
     stopTokenWatch = null;
+  }
+  if (stopAccountWatch) {
+    stopAccountWatch();
+    stopAccountWatch = null;
   }
   for (const t of startupTimers) clearTimeout(t);
   startupTimers = [];
@@ -1206,18 +1235,47 @@ export async function activate(ctx) {
   const Button = asyncComponent("Button", "button");
   const Switch = asyncComponent("Switch", "button");
 
+  // 账号相关的本地状态（是否今天已领 / 历史）—— 切账号时必须整份重读，
+  // 否则 B 账号会看到 A 账号的「今天已领」（技能 40#ENG-13 / 90#PIT-ENG-05）。
+  const loadAccountState = async () => {
+    const uid = accountUid(ctx);
+    uiState.userid = uid;
+    const history = await ctx.storage.get(scopedKey("history", uid));
+    uiState.history = Array.isArray(history) ? history : [];
+    const lastClaim = await ctx.storage.get(scopedKey("lastClaim", uid));
+    if (lastClaim && typeof lastClaim === "object" && lastClaim.dateKey === beijingDateKey()) {
+      applyRecordToState(lastClaim);
+      uiState.lastError = null;
+    } else {
+      // 换了账号（或跨天）时把上一个账号的当日结果清干净
+      uiState.today = null;
+      uiState.gainedToday = 0;
+      uiState.steps = emptySteps();
+      uiState.todayKey = beijingDateKey();
+      uiState.lastMessage = "今日尚未领取";
+      uiState.lastError = null;
+    }
+    return uid;
+  };
+
+  /** 切账号后需要作废的「用户相关」缓存：昵称、VIP 到期、本月记录、诊断信息 */
+  const resetAccountCaches = () => {
+    uiState.nickname = "";
+    uiState.vipExpire = "";
+    uiState.vipLevelName = "";
+    uiState.vipOthers = [];
+    uiState.vipRaw = null;
+    uiState.monthCount = null;
+    uiState.monthDays = [];
+    uiState.monthRaw = null;
+    uiState.diagNotes = null;
+  };
+
   // 读设置 + 本地历史 + 当日记录
   settingsReady = (async () => {
     try {
       Object.assign(settingsRef, await getSettings(ctx));
-      const history = await ctx.storage.get("history");
-      if (Array.isArray(history)) uiState.history = history;
-      const lastClaim = await ctx.storage.get("lastClaim");
-      if (lastClaim && typeof lastClaim === "object" && lastClaim.dateKey === beijingDateKey()) {
-        applyRecordToState(lastClaim);
-      } else {
-        uiState.lastMessage = "今日尚未领取";
-      }
+      await loadAccountState();
     } catch (e) {
       console.warn("[kugou-daily-vip] settings load failed:", e);
     }
@@ -1452,7 +1510,7 @@ export async function activate(ctx) {
                   style:
                     "font-size: 12px; padding: 8px 10px; border-radius: 8px; word-break: break-all; " +
                     (uiState?.lastError
-                      ? "background: var(--kdv-warn-bg); color: var(--color-warning, var(--kdv-warn));"
+                      ? "background: var(--kdv-warn-bg); color: var(--state-warning, var(--kdv-warn));"
                       : "background: var(--kdv-ok-bg); color: var(--kdv-ok);"),
                 },
                 uiState.lastMessage,
@@ -1578,7 +1636,8 @@ export async function activate(ctx) {
     await settingsReady;
     if (!settingsRef.autoDaily) return;
     if (abortRequested) abortRequested = false;
-    const done = await ctx.storage.get("lastDoneDate");
+    // 键里带 userid：A 领过之后切到 B，不能把 B 也判成「今天已完成」而静默跳过
+    const done = await ctx.storage.get(scopedKey("lastDoneDate", accountUid(ctx)));
     if (done === beijingDateKey()) return;
     requestClaim(ctx, reason, { force: true });
   };
@@ -1590,6 +1649,38 @@ export async function activate(ctx) {
     (token) => {
       if (!token) return;
       startupTimers.push(setTimeout(() => maybeAutoClaim("login"), LOGIN_DELAY_MS));
+    },
+  );
+
+  // 切换账号：`accountRevision` 是宿主 setUserInfo 里自增的权威计数
+  // （`piniaState(ctx).user.accountRevision`）。只看 token 不够 —— 切账号后 token
+  // 可能相同或短暂复用，那时既不会重读落盘状态，界面还会留着上一个账号的「已领」。
+  stopAccountWatch = ctx.vue.watch(
+    () => {
+      const root = piniaState(ctx);
+      const uid = String(root?.user?.info?.userid ?? "");
+      const rev = Number(root?.user?.accountRevision) || 0;
+      return uid + "|" + rev;
+    },
+    (next, prev) => {
+      if (next === prev) return;
+      const uid = String(next).split("|")[0];
+      void (async () => {
+        if (!uiState) return;
+        await settingsReady;
+        resetAccountCaches();
+        if (!uid) {
+          uiState.userid = "";
+          uiState.nickname = "";
+          uiState.lastMessage = "未登录 EchoMusic";
+          return;
+        }
+        await loadAccountState();
+        // 切账号后必须重新拉一次昵称 / VIP / 本月记录 —— 只清缓存不刷新的话，
+        // 面板会一直显示上一个账号的信息（或“未登录”），直到用户手动点刷新。
+        requestClaim(ctx, "account_switch_status", { statusOnly: true });
+        startupTimers.push(setTimeout(() => maybeAutoClaim("account_switch"), ACCOUNT_SWITCH_DELAY_MS));
+      })();
     },
   );
 

@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  VolumeHelper —— EchoMusic 插件 bt-volume-memory 的原生 helper。
+
+  为什么是 net462：EchoMusic 插件只能启动「插件目录内的 .exe/.com」，而这个 exe 需要读 Windows
+  音频端点（Core Audio）。选 .NET Framework 4.6.2 是因为 Win10/11 自带 4.8 运行时，**用户端零额外依赖**，
+  产物只有几十 KB（对比 .NET 8 自包含要 60 MB）。与参考项目 EarTrumpet 同栈，其 Core Audio interop 可直接移植。
+
+  构建：Host\build.ps1（走本机已装的 .NET Framework 4.6.2 参考程序集，离线、不需要联网拉 NuGet）。
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net462</TargetFramework>
+    <AssemblyName>VolumeHelper</AssemblyName>
+    <RootNamespace>VolumeHelper</RootNamespace>
+    <Version>1.0.0</Version>
+    <LangVersion>9.0</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <!-- 不引任何 NuGet 包：构建必须能离线完成 -->
+    <RestorePackages>false</RestorePackages>
+    <!-- 位数跟随宿主即可，helper 是独立进程，AnyCPU 在 x64 上以 64 位运行 -->
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <Prefer32Bit>false</Prefer32Bit>
+    <!-- 可重复构建：同样的源码产出同样的 exe，便于核验哈希 -->
+    <Deterministic>true</Deterministic>
+    <DebugType>none</DebugType>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <!--
+      中间产物与输出**绝不能落在 Host\ 里**：publish.mjs 会把插件目录整个镜像到远端，
+      obj/、bin/ 一旦生成就会被真的发出去（这是仓库里踩过一次的坑）。
+      build.ps1 在命令行上用 -p: 覆盖这两个属性，指向临时目录。
+      这里再兜一层默认值：万一有人直接 dotnet build，也不会污染插件目录。
+    -->
+    <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)..\..\.workbuddy\tmp\volume-helper-obj\</BaseIntermediateOutputPath>
+    <BaseOutputPath>$(MSBuildThisFileDirectory)..\..\.workbuddy\tmp\volume-helper-bin\</BaseOutputPath>
+  </PropertyGroup>
+
+</Project>

@@ -125,9 +125,9 @@
 }
 
 .kr-btn-danger {
-  border-color: var(--color-danger, #ef4444);
-  color: var(--color-danger, #ef4444);
-  background: color-mix(in srgb, var(--color-danger, #ef4444) 12%, transparent);
+  border-color: var(--state-danger, #ef4444);
+  color: var(--state-danger, #ef4444);
+  background: color-mix(in srgb, var(--state-danger, #ef4444) 12%, transparent);
 }
 
 .kr-btn-ghost {
@@ -273,9 +273,9 @@
 }
 
 .kr-banner-error {
-  border-color: color-mix(in srgb, var(--color-danger, #ef4444) 45%, transparent);
-  color: var(--color-danger, #ef4444);
-  background: color-mix(in srgb, var(--color-danger, #ef4444) 10%, transparent);
+  border-color: color-mix(in srgb, var(--state-danger, #ef4444) 45%, transparent);
+  color: var(--state-danger, #ef4444);
+  background: color-mix(in srgb, var(--state-danger, #ef4444) 10%, transparent);
 }
 
 .kr-banner-live {
@@ -473,12 +473,12 @@
 }
 
 .kr-op.is-on {
-  color: var(--color-danger, #ef4444);
+  color: var(--state-danger, #ef4444);
   opacity: 1;
 }
 
 .kr-op-danger:hover {
-  color: var(--color-danger, #ef4444);
+  color: var(--state-danger, #ef4444);
 }
 
 .kr-empty {
@@ -550,7 +550,7 @@
 }
 
 .kr-bad {
-  color: var(--color-danger, #ef4444);
+  color: var(--state-danger, #ef4444);
   font-weight: 600;
 }
 
@@ -559,8 +559,8 @@
   margin-left: 6px;
   font-size: 11px;
   font-weight: 600;
-  color: var(--color-warning, #f59e0b);
-  border: 1px solid color-mix(in srgb, var(--color-warning, #f59e0b) 45%, transparent);
+  color: var(--state-warning, #f59e0b);
+  border: 1px solid color-mix(in srgb, var(--state-warning, #f59e0b) 45%, transparent);
   border-radius: 5px;
   padding: 1px 5px;
   white-space: nowrap;

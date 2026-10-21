@@ -753,7 +753,8 @@ try {
   // runtime：宿主按窗口选择性加载，显式 false 是自文档化写法
   ok('manifest 显式声明 runtime（两个副窗口 false）',
     mf.runtime?.miniPlayer === false && mf.runtime?.desktopLyric === false, JSON.stringify(mf.runtime))
-  ok('版本号已递进到 1.3.0', mf.version === '1.3.0', mf.version)
+  // 锁死当前版本：忘了 bump 时这条会红（改版本时同步改这里）
+  ok('版本号已递进到 1.3.1', mf.version === '1.3.1', mf.version)
 
   // 命令标题：宿主会把它用在「插件命令: <title>」的错误归因文案里
   ok('run-speed-test 带 title',

@@ -27,15 +27,15 @@
 ├─ song-downloader/                   # 插件：歌曲下载（当前播放 / 播放队列 → 本地）
 ├─ tests/                             # 无头集成测试 + 真实网络冒烟 + 变异测试
 │  ├─ gh-accelerator.smoke.mjs       # mock ctx + 假本地桥，144 项断言
-│  ├─ kugou-daily-vip.smoke.mjs      # mock ctx + 假签到响应，93 项断言
+│  ├─ kugou-daily-vip.smoke.mjs      # mock ctx + 假签到响应，106 项断言
 │  ├─ kugou-recommend.smoke.mjs      # 真实 Vue 3 ESM + mock ctx，275 条断言
 │  ├─ kugou-recommend.live.mjs       # 打真实网关，验证上游形态确实能解析
-│  ├─ playlist-importer.smoke.mjs    # 真实 Vue 3 ESM + mock ctx + 脚本化本地路由，505 条断言
-│  ├─ playlist-importer.mutate.mjs   # 歌单导入增强的变异测试（48 个变异）
+│  ├─ playlist-importer.smoke.mjs    # 真实 Vue 3 ESM + mock ctx + 脚本化本地路由，511 条断言
+│  ├─ playlist-importer.mutate.mjs   # 歌单导入增强的变异测试（47 个变异）
 │  ├─ playlist-importer.live.mjs     # 打真实网易云 / QQ 音乐 / 酷我，验证归一化
 │  ├─ tag-filter.smoke.mjs           # 仿真宿主 DOM，382 条断言
 │  ├─ tag-filter.mutate.mjs          # 标签筛选的变异测试（26 个变异）
-│  ├─ song-downloader.smoke.mjs      # mock ctx + 真实 Range 语义的假 CDN，451 条断言
+│  ├─ song-downloader.smoke.mjs      # mock ctx + 真实 Range 语义的假 CDN，499 条断言
 │  ├─ song-downloader.mutate.mjs     # 歌曲下载的变异测试（66 个变异）
 │  └─ mutate-check.mjs               # 把关键行为改回 bug，确认测试真的会失败
 └─ docs/                                   # 时点快照：留档核验数据，不随宿主版本更新
@@ -56,6 +56,7 @@
 | **歌单导入增强** | `playlist-importer` | 把其他音乐软件的歌单导入 EchoMusic：链接 / 本地文件 / 粘贴文本，**导入前先匹配预演可人工改选**，按 hash 去重、失败清单可导出可重试 | [README](playlist-importer/README.md) |
 | **插件标签筛选** | `tag-filter` | 给「设置 → 插件」面板加一条标签筛选条：自动聚合面板内所有插件的标签，多选实时过滤、清除筛选、空状态提示 | [README](tag-filter/README.md) |
 | **歌曲下载** | `song-downloader` | 把当前播放 / 播放队列的歌下载到本地：自动挑音质、分片下载带真实进度与速度、批量队列与历史 | [README](song-downloader/README.md) |
+| **音量记忆** | `bt-volume-memory` | 按每个输出设备记住音量，设备重连时自动恢复并弹音量浮层（默认只管蓝牙）—— 蓝牙耳机断电重连后音量常被系统重置成一个大值。带一个插件目录内的原生 helper 读写 Windows 音频端点，只监听 127.0.0.1、不联网、不写注册表 | [README](bt-volume-memory/README.md) |
 
 ## 安装
 
@@ -139,8 +140,8 @@ node tests/mutate-check.mjs
 
 # GitHub 加速器（`gh-accelerator`）
 
-> 当前版本 **1.3.0**（新增：测速口径区分「延迟」与「吞吐」、测速结果持久化 6 小时、
-> 「用当前加速源检查更新」按钮；修正重启后测速状态自相矛盾的 bug）
+> 当前版本 **1.3.1**（1.3.0：测速口径区分「延迟」与「吞吐」、测速结果持久化 6 小时、
+> 「用当前加速源检查更新」按钮；修正重启后测速状态自相矛盾的 bug。1.3.1：失效的状态色变量改用宿主 `--state-*`）
 
 为宿主的**更新检查**与**在线插件市场下载**挑选最快的 GitHub 加速线路，并提供 Xget 多平台链接转换。
 
@@ -235,7 +236,7 @@ Xget 更快、支持 20+ 平台，但属于**路径重写**形态，直接填入
 
 # 插件标签筛选（`tag-filter`）
 
-> 当前版本 **1.1.0**（条件分组 + 安装/启用状态筛选 + 分组折叠/一键收起 + 自定义标签组）
+> 当前版本 **1.1.1**（条件分组 + 安装/启用状态筛选 + 分组折叠/一键收起 + 自定义标签组；1.1.1 状态色改用宿主变量）
 
 给「设置 → 插件」面板加一条**分组式筛选条**：把面板里所有插件的**标签**与**状态**自动聚合成
 条件供点选，实时过滤卡片列表，「清除筛选」回到完整列表，没有匹配时给出友好的空状态。
@@ -280,7 +281,7 @@ tests/tag-filter.mutate.mjs   变异测试（把关键行为改回 bug，确认�
 
 # 歌曲下载（`song-downloader`）
 
-> 当前版本 **1.5.1** · 需要 EchoMusic **≥ 2.3.2-beta.2**
+> 当前版本 **1.6.0** · 需要 EchoMusic **≥ 2.3.2-beta.2**（「下载到指定文件夹」需 ≥ 2.3.2-beta.10，更早的宿主自动退回系统下载目录）
 
 把「当前播放」或「播放队列」里的歌下载到本地：**正在播放的那首直接复用宿主已解析好的播放地址**
 （0 次上游请求、不触发风控），**下载前弹确认框**选音质 / 保存位置 / 文件名，
@@ -317,7 +318,7 @@ tests/tag-filter.mutate.mjs   变异测试（把关键行为改回 bug，确认�
 | 「选择位置」必须**先解析、再弹保存对话框** | `showSaveFilePicker()` 一确认就先建出 0 字节文件；顺序反了，解析失败（风控/无版权）就会在磁盘上留一堆 0 KB 残骸（1.1.0 的真实反馈，1.1.1 修） |
 
 ```
-tests/song-downloader.smoke.mjs    无头集成测试（真实 Vue 3 ESM + mock ctx + 真实 Range 语义的假 CDN）451/451 通过
+tests/song-downloader.smoke.mjs    无头集成测试（真实 Vue 3 ESM + mock ctx + 真实 Range 语义的假 CDN）499/499 通过
 tests/song-downloader.mutate.mjs   变异测试（把关键行为改回 bug，确认断言有效）                      66/66 被抓到
 ```
 
@@ -330,7 +331,7 @@ tests/song-downloader.mutate.mjs   变异测试（把关键行为改回 bug，�
 
 # 歌单导入增强（`playlist-importer`）
 
-> 当前版本 **1.0.0** · 需要 EchoMusic **≥ 2.3.2-beta.2**（用宿主内置的酷狗本地路由）
+> 当前版本 **1.0.1** · 需要 EchoMusic **≥ 2.3.2-beta.2**（用宿主内置的酷狗本地路由）
 
 把其他音乐软件的歌单导入到 EchoMusic：**链接**、**本地文件**、**粘贴文本**三种入口，
 导入前先做**匹配预演**（每首列出候选与分数，可以人工改选 / 跳过 / 单条重试），确认之后才写入酷狗云歌单。
@@ -380,8 +381,8 @@ tests/song-downloader.mutate.mjs   变异测试（把关键行为改回 bug，�
 | 风控兜底**一整轮只弹一次**验证窗 | 否则逐关键词/逐首都会弹，用户以为插件坏了 |
 
 ```
-tests/playlist-importer.smoke.mjs    无头集成测试（真实 Vue 3 ESM + mock ctx + 脚本化本地路由）505/505 通过
-tests/playlist-importer.mutate.mjs   变异测试（把关键行为改回 bug，确认断言有效）                48/48 被抓到
+tests/playlist-importer.smoke.mjs    无头集成测试（真实 Vue 3 ESM + mock ctx + 脚本化本地路由）511/511 通过
+tests/playlist-importer.mutate.mjs   变异测试（把关键行为改回 bug，确认断言有效）                46/47 被抓到
 tests/playlist-importer.live.mjs     真实网络冒烟（网易云 200 首 / QQ 音乐 30 首 / 酷我 337 首）26/26 通过
 ```
 

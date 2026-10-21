@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24"
+     fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+  <!-- 扬声器：音量 -->
+  <path d="M4 9.5h3l4-3.2v11.4l-4-3.2H4z"/>
+  <!-- 声波：正在输出 -->
+  <path d="M14.4 8.6a4.2 4.2 0 0 1 0 6.8"/>
+  <path d="M16.9 6.3a7.4 7.4 0 0 1 0 11.4"/>
+  <!-- 记忆：底部一条刻度，表示「记住这个位置」 -->
+  <path d="M4.6 19.4h9.2" opacity=".85"/>
+  <circle cx="13.8" cy="19.4" r="1.25" fill="currentColor" stroke="none"/>
+  <!-- 蓝牙标记：说明默认只管蓝牙设备 -->
+  <path d="M20.1 17.4l-2.6 2.2v-4.4l2.6 2.2z" stroke-width="1.4" opacity=".9"/>
+</svg>

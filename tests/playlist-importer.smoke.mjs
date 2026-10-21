@@ -720,10 +720,15 @@ section('5. 上游归一化')
   deepEq(mod.rawShape([]), { rawKeys: '', songKeys: '', rawSnippet: '' }, '空数组的 rawShape')
 
   // 数组挑选：带名称信息的数组优先于纯 hash 数组
+  // 夹具刻意**只给首字母大写的 SongName / SingerName、不给 AlbumName** ——
+  // 否则 NAME_FIELDS 漏掉大写形式时，靠 AlbumName 仍能命中，这条断言会假通过。
   const picked = mod.pickTrackArray({
     data: {
       hashes: [{ hash: hashOf(11) }, { hash: hashOf(12) }],
-      info: [searchItem(21, 'A', 'B'), searchItem(22, 'C', 'D')]
+      info: [
+        { FileHash: hashOf(21), SongName: 'A', SingerName: 'B' },
+        { FileHash: hashOf(22), SongName: 'C', SingerName: 'D' }
+      ]
     }
   })
   eq(picked.length, 2, '挑到 2 条')
@@ -740,6 +745,9 @@ section('5. 上游归一化')
   // 临时失败判别
   eq(mod.isTransientError('HTTP 502', 502, 0), true, '502 + error_code=0 判为临时失败')
   eq(mod.isTransientError('参数错误', 200, 20010), false, '业务错误不重试')
+  // 关键是「502 但带业务错误码」：只看状态码就会把这类拒绝也重试一遍，徒增风控风险
+  eq(mod.isTransientError('上游拒绝', 502, 20010), false, '502 + 业务 error_code 不算临时失败')
+  eq(mod.isTransientError('上游拒绝', 502, 30002), false, '502 + 次数用光不算临时失败')
   eq(mod.isTransientError('net::ERR_CONNECTION_RESET', 502, 0), true, 'ERR_CONNECTION_RESET 判为临时失败')
   eq(mod.isTransientError('未匹配', 0, 0), false, '普通文案不是临时失败')
 }
@@ -1251,6 +1259,9 @@ section('10. 导入引擎（mock 本地路由）')
     eq(res.summary.targetName, '我的导入', '目标歌单名回填')
     eq(res.summary.listid, 555, '回填新建歌单 id')
     eq(calls.filter((c) => c.url === '/playlist/add').length, 1, '建歌单请求 1 次')
+    const createCall = calls.find((c) => c.url === '/playlist/add')
+    eq(createCall.params.name, '我的导入', '建歌单必须带名字（空名字上游会直接拒绝）')
+    eq(createCall.params.type, 0, 'type=0 表示自建歌单')
     const addCalls = calls.filter((c) => c.url === '/playlist/tracks/add')
     eq(addCalls.length, 1, '加歌请求 1 次')
     eq(addCalls[0].params.listid, 555, '加歌带正确 listid')
@@ -1393,6 +1404,35 @@ section('10. 导入引擎（mock 本地路由）')
     })
     eq(res.phase, 'aborted', '中止时 phase=aborted')
     eq(calls.filter((c) => c.url === '/playlist/tracks/add').length, 0, '中止后没有写库')
+  }
+
+  // 中止（批间）：第 1 批已写、第 2 批开始前按停止 → 第 2 批不能写库。
+  // 注意不能用 `isAborted: () => true` 测这条 —— 引擎在建歌单后就提前返回了，
+  // 批间那处判断根本走不到（变异测试踩过的「前置检查遮蔽后置分支」）。
+  {
+    const { calls, deps } = depsFromHandlers(h)
+    const rows = [rowOf(1, 'A', 'a', cand(hashOf(755), 901)), rowOf(2, 'B', 'b', cand(hashOf(756), 902))]
+    let stop = false
+    // 在「第 1 批写库」这个路由返回后置停止标志 —— 下一轮循环开头（第 2 批前）才会检查到。
+    // 不能靠 progress 事件：progress 是在检查**之后**才 emit 的，那时再置标志已经晚了。
+    const wrapped = {
+      ...deps,
+      route: async (...args) => {
+        const r = await deps.route(...args)
+        if (String(args[1] || '').includes('/playlist/tracks/add')) stop = true
+        return r
+      }
+    }
+    const res = await mod.runImportEngine({
+      ctx: engineCtx,
+      rows,
+      target: { mode: 'existing', name: 'X', listid: 88, gid: '' },
+      options: { skipExisting: false, dedupeBatch: true, addBatchSize: 1, addBatchIntervalMs: 0 },
+      deps: wrapped,
+      isAborted: () => stop
+    })
+    eq(res.phase, 'aborted', '批间中止 → phase=aborted')
+    eq(calls.filter((c) => c.url === '/playlist/tracks/add').length, 1, '只写了第 1 批（第 2 批没有写库）')
   }
 
   // 没有本地路由时给明确文案
@@ -2001,7 +2041,9 @@ section('17. 收尾')
   eq(t.pages.length, 1, '只注册 1 个页面')
   eq(t.settingsDefs.length, 1, '只注册 1 个设置面板')
   eq(t.sidebarItems.length, 1, '只注册 1 个侧边栏入口')
-  ok(t.logLines.some((l) => l.includes('activated')), 'activate 有日志')
+  // 宿主没有 ctx.log（beta.7 起 asar 全量检索 0 命中），插件的 log() 是 no-op 落点；
+  // 若哪天有人又把日志接回 ctx.log，这条会红。
+  ok(t.logLines.length === 0, '不再往不存在的 ctx.log 里写字')
 }
 
 /* ---------------------------------------------------------------- 汇总 */

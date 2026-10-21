@@ -15,46 +15,68 @@
  *
  * ② 音质与 hash：完全对齐宿主 PlayerResolver 的算法
  *      - 可用音质来自 track.relateGoods（= /privilege/lite 的条目，宿主会写回轨道上），
- *        匹配表：320/hq/level4、flac/sq/level5、high/hires/level6、viper_tape/level101；
+ *        匹配表：320/hq/level4、flac/sq/level5、high/hires/level6、viper_tape/level101，
+ *        以及 beta.8 新增的 viper_clear / viper_atmos（宿主只按 quality 名匹配，不看 level）；
+ *      - 阶梯顺序以宿主 `Df` 常量为准：128<320<flac<high<viper_clear<viper_tape<viper_atmos
+ *        （与宿主设置页下拉框的展示顺序不同，降级序列用的是这个）；
  *      - **每种音质对应不同的 hash**，取地址必须用该音质自己的 hash，否则拿到的是别的文件；
  *      - 目标音质不可用时逐级降级（flac → 320 → 128）；
  *      - 128 必须用轨道主 hash —— qualityMatch(entry,'128') 恒为 true，
  *        直接 find 会命中数组第一条（可能是 flac 那条），拿到错误的音频。
  *
- * ③ 落盘：宿主**没有**给插件「写到任意目录」的能力，三条路都被堵死
- *      - ctx.fs.writeFile：路径被硬限制在插件目录内（ip() 里 resolve + relative 校验），
- *        且单次写入上限 8 MB（writePluginFile 的 uf 常量）；
- *      - ctx.process.launch：只允许启动「插件目录内的 .exe/.com」，且每次弹窗授权；
- *      - 主进程没有注册 will-download / setDownloadPath，也没有给插件暴露保存对话框。
- *    所以主通道是 Chromium 自身的下载行为：Blob + <a download>，落到**系统默认下载目录**；
- *    若宿主内核支持 File System Access API，再额外给一个「另存为…」按钮（可选任意位置）。
+ * ③ 落盘：两条路，按宿主能力运行时切换（不抬高 requires 门槛）
+ *      - **beta.10+**：ctx.fs.requestDirectory 授权一次 → ctx.net.download 由主进程流式写盘。
+ *        字节不进 renderer、无 8 MiB 上限、宿主在 committing 阶段才提交 → 失败/取消不留 0 KB 残骸。
+ *        授权是引用式的：只存 DirectoryRef.id + 相对路径，绝不拼绝对路径；
+ *      - **旧宿主**：Blob + <a download> 落到系统下载目录，或 showSaveFilePicker 另存为（仅单曲）。
+ *        历史原因见下：ctx.fs.writeFile 被限制在插件目录内且 ≤ 8 MB，
+ *        ctx.process.launch 只允许插件目录内的 exe，主进程也没有 will-download 通道。
  *
  * ④ 进度：ctx.net.request 没有字节回调，所以默认用 Range 分片（1 MiB/片）自建进度与速度；
  *    服务端忽略 Range（回 200 并给整包）时自动退回一次性下载。
  *    注意 `maxResponseBytes` 必须显式传 0（= 不限制），否则默认 32 MiB 会把大 FLAC 截断。
+ *    走 ctx.net.download 时进度直接取宿主快照（receivedBytes / totalBytes）。
  *
- * 取消：不向宿主传 AbortSignal（要跨 IPC 序列化，风险大于收益），改为在分片之间检查标志，
- *      因此「停止」的生效粒度是「当前分片下载完」。
+ * 取消：旧路线在分片之间检查标志（粒度 = 当前分片）；主进程传输则显式 task.cancel()，
+ *      否则字节会继续跑、还占着「全局 3 / 单插件 2」的传输配额。
  */
 
 const PLUGIN_ID = 'song-downloader'
 
 const KEY_SETTINGS = 'settings'
 const KEY_HISTORY = 'history'
+/** 已授权保存目录的引用（只存 id/name/displayPath，**绝不存绝对路径**，技能 15#FD-02） */
+const KEY_SAVE_DIR = 'saveDirectory'
 
-/** 音质阶梯：低 → 高（与宿主 Us 常量一致） */
-const QUALITY_LADDER = ['128', '320', 'flac', 'high', 'viper_tape']
+/**
+ * 音质阶梯：低 → 高。
+ * 顺序与宿主 `PlayerResolver` 的 `Df` 常量逐字一致（asar 核验）——
+ * 注意 `viper_clear` 排在 `viper_tape` **之前**，`viper_atmos` 最高。
+ * 宿主 UI 下拉框的展示顺序是另一种（tape 在前），但降级序列用的是这个，别按 UI 抄。
+ * 新增档位（beta.8 起 viper_clear / viper_atmos）都必须在这里，否则「自动」永远选不到。
+ */
+const QUALITY_LADDER = ['128', '320', 'flac', 'high', 'viper_clear', 'viper_tape', 'viper_atmos']
 
 const QUALITY_LABEL = {
   '128': '128K',
   '320': '320K',
   flac: 'FLAC',
   high: 'Hi-Res',
-  viper_tape: '母带'
+  viper_clear: '蝰蛇超清',
+  viper_tape: '母带',
+  viper_atmos: '蝰蛇全景声'
 }
 
 /** 粗略码率（kbps），仅用于「是不是只有试听片段」的估算 */
-const QUALITY_BITRATE = { '128': 128, '320': 320, flac: 900, high: 1200, viper_tape: 1300 }
+const QUALITY_BITRATE = {
+  '128': 128,
+  '320': 320,
+  flac: 900,
+  high: 1200,
+  viper_clear: 2000, // 24bit/96kHz 量级
+  viper_tape: 1300,
+  viper_atmos: 1600 // 全景声容器，按保守值估，避免误报「只有试听片段」
+}
 
 const EXT_MIME = {
   mp3: 'audio/mpeg',
@@ -96,8 +118,8 @@ const MAX_TASKS = 400
 const MAX_FILE_BYTES = 1024 * 1024 * 1024 // 单文件上限 1 GiB，防止误点把内存吃光
 
 const DEFAULT_SETTINGS = {
-  quality: 'auto', // auto | 128 | 320 | flac | high | viper_tape
-  saveMode: 'direct', // direct（系统下载目录）| ask（单曲弹另存为对话框）
+  quality: 'auto', // auto | 128 | 320 | flac | high | viper_clear | viper_tape | viper_atmos
+  saveMode: 'direct', // direct（系统下载目录）| folder（已授权的指定文件夹）| ask（单曲弹另存为对话框）
   confirmBeforeDownload: true, // 下载前弹确认框（可改音质/保存位置/文件名）
   preferHostUrl: true, // 当前播放的歌直接复用宿主已解析的播放地址（最稳，避开风控）
   taskCenter: true, // 把下载任务同步到标题栏「任务中心」（含进度条与停止/重试）
@@ -281,7 +303,10 @@ function qualityMatch(entry, quality) {
   if (quality === '320') return name === '320' || name === 'hq' || level === 4
   if (quality === 'flac') return name === 'flac' || name === 'sq' || level === 5
   if (quality === 'high') return name === 'high' || name === 'hires' || name === 'hi-res' || name === 'res' || level === 6
+  // 蝰蛇超清 / 全景声：宿主只按 quality 名匹配，不看 level（asar 的 `Bf` 实现逐字如此）
+  if (quality === 'viper_clear') return name === 'viper_clear'
   if (quality === 'viper_tape') return name === 'viper_tape' || level === 101
+  if (quality === 'viper_atmos') return name === 'viper_atmos'
   return false
 }
 
@@ -315,7 +340,7 @@ function candidateQualities(track, preferred) {
 
 /** 音质 → 扩展名（拿不到上游 extName 时的兜底） */
 function guessExtByQuality(quality) {
-  if (quality === 'flac' || quality === 'high' || quality === 'viper_tape') return 'flac'
+  if (quality === 'flac' || quality === 'high' || quality === 'viper_clear' || quality === 'viper_tape' || quality === 'viper_atmos') return 'flac'
   return 'mp3'
 }
 
@@ -383,6 +408,32 @@ function hostQualityCovers(hostQuality, preferred) {
 
 function mimeForExt(ext) {
   return EXT_MIME[str(ext).toLowerCase()] || 'application/octet-stream'
+}
+
+/**
+ * 宿主是否具备 beta.10 起的「目录授权 + 主进程流式下载」。
+ *
+ * ⚠️ 这是**运行时探测**，不写进 `requires.echoMusicVersion` ——
+ * 把门槛提到 `>=2.3.2-beta.10` 会直接砍掉所有旧版宿主用户；而旧路线
+ * （Blob + showSaveFilePicker）本来就在，保留它做回退才是正解（技能 15#FD-01）。
+ */
+function nativeFolderAvailable(ctx) {
+  return !!(
+    ctx &&
+    ctx.fs &&
+    typeof ctx.fs.requestDirectory === 'function' &&
+    typeof ctx.fs.listDirectoryGrants === 'function' &&
+    typeof ctx.fs.stat === 'function' &&
+    ctx.net &&
+    typeof ctx.net.download === 'function'
+  )
+}
+
+/** 从文件引用里取出「文件名」用于展示：directory-file 只有 relativePath */
+function fileNameOfRef(ref, fallback) {
+  const rel = str(ref && ref.relativePath)
+  if (rel) return rel.split(/[\\/]/).pop() || rel
+  return str(ref && ref.name) || fallback
 }
 
 /* ========================================================================== *
@@ -1171,7 +1222,15 @@ export async function activate(ctx) {
     }
     const q = str(out.quality)
     out.quality = q === 'auto' || QUALITY_LADDER.includes(q) ? q : 'auto'
-    out.saveMode = out.saveMode === 'ask' ? 'ask' : 'direct'
+    // folder 只在宿主真的支持时保留；旧宿主上一律退回 direct（否则每次下载都失败）
+    out.saveMode =
+      out.saveMode === 'folder'
+        ? nativeFolderAvailable(ctx)
+          ? 'folder'
+          : 'direct'
+        : out.saveMode === 'ask'
+          ? 'ask'
+          : 'direct'
     out.fileNameTemplate = str(out.fileNameTemplate) || DEFAULT_SETTINGS.fileNameTemplate
     out.chunkSizeMb = clamp(out.chunkSizeMb, 1, 8)
     out.maxRetries = clamp(out.maxRetries, 0, 3)
@@ -1198,8 +1257,21 @@ export async function activate(ctx) {
     notice: '',
     beat: 0, // 时间显示用的心跳（500ms 级）
     tick: 0, // 进度插值用的快心跳（200ms 级，只在下载中递增）
-    resolved: null // { trackId, quality, count, url, at }
+    resolved: null, // { trackId, quality, count, url, at }
+    // 已授权的保存目录（DirectoryRef 的最小投影）：{ id, name, displayPath }
+    // `displayPath` 只用于显示；真正写盘走 id + relativePath（技能 15#FD-02）
+    saveDir: null
   })
+
+  // 目录授权引用是纯数据，可以安全放进 reactive；启动时先读回来，下载时再校验可用性
+  const storedSaveDir = await readStorage(KEY_SAVE_DIR, null)
+  if (storedSaveDir && typeof storedSaveDir === 'object' && str(storedSaveDir.id)) {
+    state.saveDir = {
+      id: str(storedSaveDir.id),
+      name: str(storedSaveDir.name),
+      displayPath: str(storedSaveDir.displayPath)
+    }
+  }
 
   /**
    * 已显示过的最大进度（taskId → 字节）。
@@ -1219,7 +1291,7 @@ export async function activate(ctx) {
     open: false,
     tracks: [],
     quality: 'auto',
-    destination: 'downloads', // downloads | picker
+    destination: 'downloads', // downloads（系统下载目录）| folder（已授权文件夹，主进程写盘）| picker（另存为）
     pickedName: '',
     template: '',
     chunked: true,
@@ -1235,6 +1307,8 @@ export async function activate(ctx) {
    *  之后 handle.createWritable() 的 this 就变成 Proxy，内部槽校验会抛 "Illegal invocation"。 */
   const controllers = new Map() // taskId → { canceled }
   const saveTargets = new Map() // taskId → FileSystemFileHandle
+  /** taskId → 宿主 `ctx.net.download` 的传输句柄（用于取消；不放进 reactive，句柄不是纯数据） */
+  const nativeTasks = new Map()
   const noticeTimers = []
   let runningCount = 0
   let taskSeq = 0
@@ -1253,6 +1327,141 @@ export async function activate(ctx) {
   }
 
   /* ---------------- 任务引擎 ---------------- */
+
+  /* ---- 目录授权 + 主进程流式下载（beta.10 起） ---- */
+
+  const folderSupported = () => nativeFolderAvailable(ctx)
+
+  /** 让用户挑一个保存文件夹；成功后立刻切到 folder 模式 */
+  async function pickSaveDirectory() {
+    if (!folderSupported()) {
+      notice('当前宿主不支持「下载到指定文件夹」，请升级到 2.3.2-beta.10 或更新版本')
+      return
+    }
+    try {
+      const selection = await ctx.fs.requestDirectory({
+        access: 'read-write',
+        purpose: '保存下载的音乐',
+        persist: true
+      })
+      if (!selection || !selection.ok) {
+        const msg = selection && selection.error && selection.error.message
+        notice('选择文件夹失败：' + (str(msg) || '未知错误'))
+        return
+      }
+      if (selection.canceled) return
+      const dir = selection.directory || {}
+      if (!str(dir.id)) {
+        notice('宿主没有返回目录引用，请重试')
+        return
+      }
+      state.saveDir = { id: str(dir.id), name: str(dir.name), displayPath: str(dir.displayPath) }
+      await writeStorage(KEY_SAVE_DIR, state.saveDir)
+      setSetting('saveMode', 'folder')
+      notice('已授权文件夹：' + (state.saveDir.name || state.saveDir.displayPath || state.saveDir.id))
+    } catch (e) {
+      log('requestDirectory 失败', e)
+      notice('选择文件夹失败：' + ((e && e.message) || String(e)))
+    }
+  }
+
+  /**
+   * 校验授权是否仍然可用。撤销 / 换安装来源都会让旧 ID 失效
+   * （宿主按「安装身份」记授权，换源后旧授权不再沿用 —— 技能 15#FD-08）。
+   */
+  async function resolveSaveDirectory() {
+    const saved = state.saveDir
+    if (!saved || !str(saved.id)) return null
+    try {
+      const res = await ctx.fs.listDirectoryGrants()
+      const list = Array.isArray(res) ? res : Array.isArray(res && res.directories) ? res.directories : []
+      const hit = list.find((d) => d && str(d.id) === str(saved.id))
+      if (!hit || hit.available === false) return null
+      return hit
+    } catch (e) {
+      log('查询目录授权失败', e)
+      return null
+    }
+  }
+
+  function nativePhaseText(state) {
+    if (state === 'queued') return '排队中…'
+    if (state === 'connecting') return '连接中…'
+    if (state === 'verifying') return '校验文件…'
+    if (state === 'committing') return '写入文件…'
+    return '下载中…'
+  }
+
+  /**
+   * 用宿主的 `ctx.net.download` 直接把字节流写进授权目录。
+   *
+   * 与旧路线的区别（技能 15#FD-03/04）：
+   * - 字节不经过 renderer（内存恒定，不再把整首歌拼进 Uint8Array）；
+   * - 没有 8 MiB 上限（`ctx.fs.writeFile` 才有）；
+   * - 宿主在 `committing` 阶段才替换最终文件 → **失败/取消不会留下 0 KB 残骸**；
+   * - 进度来自宿主快照（receivedBytes / totalBytes），`totalBytes` 未知时不给虚假百分比。
+   */
+  async function runNativeDownload(task, resolved, fileName, speedSamples, isCanceled) {
+    const dir = await resolveSaveDirectory()
+    if (!dir) return { ok: false, error: '保存文件夹的授权已失效，请在设置里重新选择文件夹' }
+
+    const urls = (resolved.urls || []).filter(Boolean)
+    if (!urls.length) return { ok: false, error: '没有可用的下载地址' }
+
+    // 相对路径会被宿主拒绝：越界 / 绝对路径 / 链接 / Windows 设备名。
+    // 文件名里的路径分隔符一律压平，剩下的交给宿主校验。
+    const rel = str(fileName).replace(/[\\/:*?"<>|]+/g, '_').trim() || 'download.bin'
+    const errors = []
+
+    for (const url of urls) {
+      if (isCanceled()) return { canceled: true }
+      let handle = null
+      let unsub = null
+      try {
+        handle = await ctx.net.download({
+          url,
+          target: { directoryId: str(dir.id), relativePath: rel },
+          name: fileName,
+          // 重名自动改名（宿主会返回实际文件名），绝不覆盖用户已有文件
+          conflict: 'rename'
+        })
+        nativeTasks.set(task.id, handle)
+        unsub = handle.subscribe((snap) => {
+          const received = num(snap && snap.receivedBytes, 0)
+          const total = num(snap && snap.totalBytes, 0)
+          const st = str(snap && snap.state)
+          patch(task, {
+            status: st === 'verifying' || st === 'committing' ? 'saving' : 'downloading',
+            phaseText: nativePhaseText(st),
+            loaded: received,
+            total,
+            speed: pushSpeedSample(speedSamples, received),
+            chunkBytes: 0
+          })
+        })
+        const result = await handle.wait()
+        return {
+          ok: true,
+          bytes: num(result && result.bytes, 0),
+          file: fileNameOfRef(result && result.file, rel),
+          method: 'native'
+        }
+      } catch (e) {
+        if (isCanceled()) return { canceled: true }
+        errors.push(clipUrl(url) + ' → ' + ((e && e.message) || String(e)))
+        log('主进程下载失败，尝试下一个候选', clipUrl(url), e)
+        try {
+          if (handle) await handle.cancel()
+        } catch {
+          /* 任务可能已进入终态，取消失败不影响主流程 */
+        }
+      } finally {
+        if (unsub) unsub()
+        nativeTasks.delete(task.id)
+      }
+    }
+    return { ok: false, error: errors.join('；') || '主进程下载失败' }
+  }
 
   function hasActiveTasks() {
     return state.tasks.some((t) => t.status === 'resolving' || t.status === 'downloading' || t.status === 'saving')
@@ -1277,7 +1486,7 @@ export async function activate(ctx) {
     )
   }
 
-  function createTask(track, qualityOverride) {
+  function createTask(track, qualityOverride, opts) {
     taskSeq += 1
     const task = {
       id: 't' + Date.now().toString(36) + '-' + taskSeq,
@@ -1307,6 +1516,8 @@ export async function activate(ctx) {
       warning: '',
       needsVerify: false,
       preResolved: null, // 确认框里已解析好的地址（避免重复请求 / 地址过期时会在执行时兜底重解析）
+      // 保存目标：folder = 主进程流式写盘（beta.10+）；其余走「系统下载目录 / 另存为」旧路线
+      saveMode: (opts && opts.saveMode) || state.settings.saveMode,
       group: '', // 批量下载的分组 id（>1 首时才有）：任务中心把它们收进一个父条目
       src: trackSnapshot(track)
     }
@@ -1663,7 +1874,7 @@ export async function activate(ctx) {
         fileName
       })
 
-      const speedSamples = [] // 滑动窗口速度（见 pushSpeedSample）；两次 downloadBytes 共用同一批样本
+      const speedSamples = [] // 滑动窗口速度（见 pushSpeedSample）；两次尝试共用同一批样本
       const dlOptions = {
         chunked: !!state.settings.chunked,
         chunkSize: clamp(state.settings.chunkSizeMb, 1, 8) * 1024 * 1024,
@@ -1676,7 +1887,20 @@ export async function activate(ctx) {
         }
       }
 
-      let result = await downloadBytes(ctx, resolved.urls, dlOptions)
+      // 目录模式（beta.10+）：主进程流式写盘，字节不进 renderer，也不留 0 KB 残骸。
+      // `handle` 存在说明用户选了「另存为」，那条必须走旧的 picker 路线。
+      const useNative = task.saveMode === 'folder' && !handle
+      let nativeResult = null
+      const runOnce = async () => {
+        if (!useNative) return downloadBytes(ctx, resolved.urls, dlOptions)
+        const r = await runNativeDownload(task, resolved, fileName, speedSamples, isCanceled)
+        if (r.canceled) return { ok: false, canceled: true, error: '已取消' }
+        if (!r.ok) return { ok: false, error: r.error }
+        nativeResult = r
+        return { ok: true, total: r.bytes, viaChunked: false }
+      }
+
+      let result = await runOnce()
 
       // 用的是「宿主的地址」或「确认框里预解析的地址」时，失败就退回自己重新解析一次再试
       if (!result.ok && !result.canceled && usedCached && !isCanceled()) {
@@ -1685,7 +1909,8 @@ export async function activate(ctx) {
         if (again.ok) {
           resolved = again
           patch(task, { actualQuality: again.quality, source: again.source || '', attempts: (again.attempts || []).length })
-          result = await downloadBytes(ctx, resolved.urls, dlOptions)
+          nativeResult = null
+          result = await runOnce()
         }
       }
 
@@ -1696,11 +1921,12 @@ export async function activate(ctx) {
       }
       if (!result.ok) throw new Error(result.error || '下载失败')
 
-      const bytes = result.total || 0
+      const bytes = result.total || task.loaded || 0
       const warning = suspectShortClip(track, resolved.quality, bytes)
+      const alreadyWritten = !!nativeResult
       patch(task, {
         status: 'saving',
-        phaseText: handle ? '写入文件…' : '交给下载器…',
+        phaseText: alreadyWritten || handle ? '写入文件…' : '交给下载器…',
         loaded: bytes,
         total: bytes,
         bytes,
@@ -1710,7 +1936,10 @@ export async function activate(ctx) {
       })
 
       let saveResult
-      if (handle) {
+      if (nativeResult) {
+        // 宿主已经在校验后提交了最终文件，这里只登记结果
+        saveResult = { method: 'native', file: nativeResult.file }
+      } else if (handle) {
         saveResult = await writeToHandle(handle, result.parts, mime)
       } else {
         saveResult = saveViaAnchor(result.parts, fileName, mime, log)
@@ -1718,7 +1947,7 @@ export async function activate(ctx) {
 
       patch(task, {
         status: 'done',
-        phaseText: saveResult.method === 'picker' ? '已保存' : '已交给下载器',
+        phaseText: saveResult.method === 'anchor' ? '已交给下载器' : '已保存',
         endedAt: Date.now(),
         speed: 0,
         bytes,
@@ -1843,6 +2072,19 @@ export async function activate(ctx) {
   function startDownloads(tracks, qualityOverride, opts) {
     const options = opts || {}
     const created = []
+    // 目录模式前置检查：没授权/宿主不支持就退回系统下载目录，
+    // 否则每个任务都会在 executeTask 里失败一遍（用户看到的是「全都失败」）
+    let saveMode = str(options.saveMode) || state.settings.saveMode
+    if (saveMode === 'folder' && (options.saveHandle || !folderSupported() || !state.saveDir)) {
+      if (!options.saveHandle) {
+        notice(
+          !folderSupported()
+            ? '当前宿主不支持「指定文件夹」，已改用系统下载目录（升级到 2.3.2-beta.10+ 可用）'
+            : '还没有选择保存文件夹，已改用系统下载目录'
+        )
+      }
+      saveMode = 'direct'
+    }
     for (const raw of tracks) {
       const track = toNormalized(raw)
       if (!track) continue
@@ -1850,7 +2092,7 @@ export async function activate(ctx) {
         notice(track.unsupported)
         continue
       }
-      const task = createTask(track, qualityOverride)
+      const task = createTask(track, qualityOverride, { saveMode })
       if (task) {
         if (options.saveHandle) saveTargets.set(task.id, options.saveHandle)
         // 预解析结果只对「单曲 + 已经解析过」的场景有意义（确认框里先解析、再弹保存对话框）
@@ -1878,6 +2120,12 @@ export async function activate(ctx) {
     if (!task) return
     const ctrl = controllers.get(task.id)
     if (ctrl) ctrl.canceled = true
+    // 主进程传输必须显式 cancel：只置标志位的话字节还在往下走，
+    // 而且会占着「全局 3 / 单插件 2」的传输槽（技能 15#FD-06）
+    const native = nativeTasks.get(task.id)
+    if (native && typeof native.cancel === 'function') {
+      void Promise.resolve(native.cancel()).catch(() => {})
+    }
     if (task.status === 'pending') patch(task, { status: 'canceled', phaseText: '已取消', endedAt: Date.now() })
   }
 
@@ -2111,7 +2359,7 @@ export async function activate(ctx) {
       return pct === null ? '下载中…' : '下载中 ' + pct + '%'
     }
     if (task.status === 'saving') return '写入文件…'
-    if (task.status === 'done') return task.saveMethod === 'picker' ? '已保存' : '已交给下载器'
+    if (task.status === 'done') return task.saveMethod === 'anchor' ? '已交给下载器' : '已保存'
     if (task.status === 'canceled') return '已取消'
     return '失败'
   }
@@ -2562,11 +2810,13 @@ export async function activate(ctx) {
                 },
                 [
                   ['auto', '音质：自动（最优可用）'],
+                  ['viper_atmos', '音质：蝰蛇全景声'],
+                  ['viper_tape', '音质：母带'],
+                  ['viper_clear', '音质：蝰蛇超清'],
+                  ['high', '音质：Hi-Res'],
                   ['flac', '音质：FLAC'],
                   ['320', '音质：320K'],
-                  ['128', '音质：128K'],
-                  ['high', '音质：Hi-Res'],
-                  ['viper_tape', '音质：母带']
+                  ['128', '音质：128K']
                 ].map(([v, label]) => h('option', { value: v, selected: state.settings.quality === v }, label))
               )
             ])
@@ -2700,16 +2950,37 @@ export async function activate(ctx) {
             ),
             select('quality', '默认音质', '「自动」= 该歌可用的最高音质；不可用时自动逐级降级', [
               ['auto', '自动（最优可用）'],
+              ['viper_atmos', '蝰蛇全景声'],
+              ['viper_tape', '母带'],
+              ['viper_clear', '蝰蛇超清'],
+              ['high', 'Hi-Res'],
               ['flac', 'FLAC'],
               ['320', '320K'],
-              ['128', '128K'],
-              ['high', 'Hi-Res'],
-              ['viper_tape', '母带']
+              ['128', '128K']
             ]),
-            select('saveMode', '保存方式', '「直接下载」落到系统下载目录；「弹窗询问」仅对单曲生效（需要内核支持）', [
+            select('saveMode', '保存方式', '「指定文件夹」由宿主在主进程里流式写盘：不限大小、不会留下空文件；「弹窗询问」仅对单曲生效', [
               ['direct', '直接下载到系统下载目录'],
+              ...(folderSupported() ? [['folder', '下载到指定文件夹（推荐）']] : []),
               ['ask', '弹窗询问保存位置（单曲）']
             ]),
+            folderSupported()
+              ? row(
+                  'saveDir',
+                  '保存文件夹',
+                  state.saveDir
+                    ? '已授权：' + (state.saveDir.displayPath || state.saveDir.name || state.saveDir.id)
+                    : '还没有选择文件夹（只需授权一次，之后可在插件管理页「已授权文件与目录」里撤销）',
+                  h(
+                    'button',
+                    {
+                      class: 'sd-btn',
+                      'data-action': 'pick-save-dir',
+                      onClick: () => void pickSaveDirectory()
+                    },
+                    state.saveDir ? '重新选择' : '选择文件夹'
+                  )
+                )
+              : null,
             row(
               'fileNameTemplate',
               '文件名模板',
@@ -2750,11 +3021,13 @@ export async function activate(ctx) {
 
   const QUALITY_OPTIONS = [
     ['auto', '自动（最优可用）'],
+    ['viper_atmos', '蝰蛇全景声'],
+    ['viper_tape', '母带'],
+    ['viper_clear', '蝰蛇超清'],
+    ['high', 'Hi-Res'],
     ['flac', 'FLAC'],
     ['320', '320K'],
-    ['128', '128K'],
-    ['high', 'Hi-Res'],
-    ['viper_tape', '母带']
+    ['128', '128K']
   ]
 
   function isAbortError(e) {
@@ -2805,7 +3078,8 @@ export async function activate(ctx) {
     }
     dlg.tracks = list
     dlg.quality = state.settings.quality
-    dlg.destination = 'downloads'
+    // 默认保存位置跟随设置：配了授权文件夹就用它（批量下载也能用，不必逐首弹窗）
+    dlg.destination = folderSupported() && state.saveDir && state.settings.saveMode === 'folder' ? 'folder' : 'downloads'
     dlg.pickedName = ''
     dlg.template = state.settings.fileNameTemplate
     dlg.chunked = !!state.settings.chunked
@@ -2859,7 +3133,7 @@ export async function activate(ctx) {
     const quality = dlg.quality
     const wantPicker = dlg.destination === 'picker'
     if (wantPicker && list.length > 1) {
-      dlg.error = '批量下载只能存到系统下载目录'
+      dlg.error = '批量下载不能逐首弹窗，请改用「已授权文件夹」或系统下载目录'
       return
     }
 
@@ -2913,7 +3187,9 @@ export async function activate(ctx) {
       setSetting('toastOnDone', !!dlg.toastOnDone)
     }
     const raws = list.map((x) => x.raw)
-    const opts = handle ? { saveHandle: handle, preResolved } : undefined
+    const opts = { saveMode: dlg.destination === 'folder' ? 'folder' : 'direct' }
+    if (handle) opts.saveHandle = handle
+    if (preResolved) opts.preResolved = preResolved
     closeDownloadDialog()
     startDownloads(raws, quality, opts)
   }
@@ -2924,8 +3200,8 @@ export async function activate(ctx) {
       return
     }
     if (group === 'dest') {
-      if (value === 'downloads') {
-        dlg.destination = 'downloads'
+      if (value === 'downloads' || value === 'folder') {
+        dlg.destination = value
         dlg.pickedName = ''
         dlg.error = ''
         return
@@ -3016,20 +3292,27 @@ export async function activate(ctx) {
         optionChip('dest', 'downloads', '系统下载目录', dlg.destination === 'downloads', false, {
           title: 'Windows 通常是 %USERPROFILE%\\Downloads'
         }),
+        folderSupported() && state.saveDir
+          ? optionChip('dest', 'folder', '已授权文件夹', dlg.destination === 'folder', false, {
+              title: '保存到：' + (state.saveDir.displayPath || state.saveDir.name) + '（批量下载也可以）'
+            })
+          : null,
         optionChip('dest', 'picker', canUseSavePicker() ? '选择位置…' : '选择位置（不支持）', dlg.destination === 'picker', multi || !canUseSavePicker(), {
-          title: multi ? '批量下载只能存到系统下载目录' : '打开系统保存对话框，自己选目录与文件名'
+          title: multi ? '批量下载不能逐首弹窗；请用「已授权文件夹」或系统下载目录' : '打开系统保存对话框，自己选目录与文件名'
         })
       ]),
       h(
         'div',
         { class: 'sd-muted' },
-        dlg.destination === 'picker' && dlg.pickedName
-          ? '将保存到：' + dlg.pickedName
-          : dlg.destination === 'picker'
-            ? '点「开始下载」后**先解析播放地址**，再弹出系统保存对话框 —— 解析失败不会创建任何文件（避免留下 0 KB 空文件）'
-            : multi
-              ? '批量下载逐首落到系统下载目录（Windows 通常是 %USERPROFILE%\\Downloads）'
-              : '落到系统下载目录（Windows 通常是 %USERPROFILE%\\Downloads）；想指定位置点「选择位置…」'
+        dlg.destination === 'folder'
+          ? '将保存到：' + (state.saveDir.displayPath || state.saveDir.name) + '（宿主在主进程里流式写盘；失败或取消不会留下空文件）'
+          : dlg.destination === 'picker' && dlg.pickedName
+            ? '将保存到：' + dlg.pickedName
+            : dlg.destination === 'picker'
+              ? '点「开始下载」后**先解析播放地址**，再弹出系统保存对话框 —— 解析失败不会创建任何文件（避免留下 0 KB 空文件）'
+              : multi
+                ? '批量下载逐首落到系统下载目录（Windows 通常是 %USERPROFILE%\\Downloads）'
+                : '落到系统下载目录（Windows 通常是 %USERPROFILE%\\Downloads）；想指定位置点「选择位置…」'
       )
     ])
 
@@ -3548,6 +3831,16 @@ export async function activate(ctx) {
     }
     controllers.clear()
     saveTargets.clear()
+    // 禁用/更新插件时宿主要求「关闭旧上下文的媒体租约并中断其任务」——
+    // 主进程传输不主动 cancel 会继续跑到下一个上下文里（技能 15#FD-05）
+    for (const handle of nativeTasks.values()) {
+      try {
+        void Promise.resolve(handle && handle.cancel()).catch(() => {})
+      } catch {
+        /* 忽略 */
+      }
+    }
+    nativeTasks.clear()
     for (const stop of watchers) {
       try {
         if (typeof stop === 'function') stop()
@@ -3613,6 +3906,8 @@ export async function activate(ctx) {
     closeDownloadDialog,
     confirmDownloadDialog,
     chooseSaveTarget,
+    pickSaveDirectory,
+    resolveSaveDirectory,
     dlgPreviewName,
     cancelAll,
     cancelTask,

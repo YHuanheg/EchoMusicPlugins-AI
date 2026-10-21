@@ -7,7 +7,7 @@
 
 - 插件名：推荐电台
 - 插件 id：`kugou-recommend`
-- 版本：1.2.1
+- 版本：1.2.2
 - 作者：YHuanheg
 - 依赖：EchoMusic `>=2.3.2-beta.2`（需宿主已内置酷狗接口通道）
 - 能力声明：`unrestrictedNetwork`（频道漫游需要直连网关）、`kugouVerification`（账号风控兜底）

@@ -2381,13 +2381,16 @@ export function activate(ctx) {
 
   /* ------------------------------------------------------------------ 日志 */
 
-  function log(...args) {
-    try {
-      if (ctx.log && typeof ctx.log === 'function') ctx.log('[' + PLUGIN_ID + ']', ...args)
-    } catch {
-      /* 日志失败不影响功能 */
-    }
-  }
+  /**
+   * 宿主**没有** `ctx.log`：2.3.2-beta.7 起对本机 `app.asar` 全量检索 `ctx.log` / `plugins.log`
+   * 均 0 命中，`createPluginContext` 也没有 `log` 键（技能 `10#API-11` / `00#HOST-08`）。
+   * 插件能落进宿主日志的只有宿主代打的那几类（`[Plugin]` / `[PluginResources]` / `[DialogHost]`）；
+   * 用户可见的状态用 `ctx.toast`，排障走「复制诊断」。
+   *
+   * 这里保留一个 no-op 落点：调用点分布在下载/解析链路里，删掉会把诊断意图一起删掉，
+   * 下次要接真正的日志出口时还得逐处加回来。
+   */
+  function log() {}
 
   /* ---------------------------------------------------------------- 设置项 */
 

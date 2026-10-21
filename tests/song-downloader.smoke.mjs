@@ -617,6 +617,95 @@ function validateTaskDef(def) {
   }
 }
 
+/**
+ * 模拟 beta.10 起的 `ctx.fs` 文件授权面（只实现插件实际用到的那三个方法）。
+ * 返回值形态与官方 `files-and-downloads.md` 一致：结果是 `{ok,...}` / `{ok:false,error}`。
+ */
+function makeNativeFs(spec) {
+  const rec = spec.records
+  return {
+    async requestDirectory(options) {
+      rec.requestDirectoryCalls.push(options)
+      if (spec.directoryCanceled) return { ok: true, canceled: true }
+      if (spec.directoryError) return { ok: false, error: { code: 'PLUGIN_UNAVAILABLE', message: spec.directoryError } }
+      return {
+        ok: true,
+        canceled: false,
+        directory: spec.directory || { id: 'dir-1', name: '音乐', displayPath: 'D:/Music', access: 'read-write', available: true }
+      }
+    },
+    async listDirectoryGrants() {
+      // 默认返回「已授权且可用」；`spec.grants = []` 用来测授权失效
+      return spec.grants || [{ id: 'dir-1', name: '音乐', displayPath: 'D:/Music', access: 'read-write', available: true }]
+    },
+    async stat() {
+      const err = new Error('file missing')
+      err.code = 'FILE_MISSING'
+      throw err
+    }
+  }
+}
+
+/**
+ * 模拟宿主 `ctx.net.download`：返回与官方一致的传输句柄。
+ * 用 `Object.create(base)` 保住 `net.calls` 等共享状态（测试里到处在清空它们）。
+ */
+function makeNativeNet(base, spec) {
+  const rec = spec.records
+  const netForCtx = Object.create(base)
+  netForCtx.download = async (options) => {
+    rec.downloadCalls.push(options)
+    let snapshot = { state: 'queued', receivedBytes: 0, totalBytes: 0, bytesPerSecond: 0, remainingSeconds: null }
+    const listeners = []
+    const emit = (next) => {
+      snapshot = { ...snapshot, ...next }
+      for (const cb of listeners.slice()) cb({ ...snapshot })
+    }
+    const handle = {
+      getSnapshot: () => ({ ...snapshot }),
+      subscribe(cb) {
+        listeners.push(cb)
+        cb({ ...snapshot }) // 宿主会「立即发一次缓存快照」
+        return () => {
+          const i = listeners.indexOf(cb)
+          if (i >= 0) listeners.splice(i, 1)
+        }
+      },
+      async pause() {},
+      async resume() {},
+      async retry() {},
+      async cancel() {
+        rec.cancelCalls += 1
+        emit({ state: 'canceled' })
+      },
+      async wait() {
+        emit({ state: 'connecting' })
+        const fail = spec.failDownloads > 0
+        if (fail) {
+          spec.failDownloads -= 1
+          emit({ state: 'failed' })
+          throw Object.assign(new Error(spec.failMessage || 'network down'), { code: 'NETWORK' })
+        }
+        const total = Number(spec.bytes) || 1024
+        emit({ state: 'downloading', receivedBytes: Math.floor(total / 2), totalBytes: total })
+        emit({ state: 'committing', receivedBytes: total, totalBytes: total })
+        emit({ state: 'completed', receivedBytes: total, totalBytes: total })
+        return {
+          taskId: 'dl-' + rec.downloadCalls.length,
+          file: {
+            kind: 'directory-file',
+            directoryId: options.target.directoryId,
+            relativePath: options.target.relativePath
+          },
+          bytes: total
+        }
+      }
+    }
+    return handle
+  }
+  return netForCtx
+}
+
 function makeCtx(options) {
   const o = options || {}
   const storage = o.storage || new Map()
@@ -804,7 +893,10 @@ function makeCtx(options) {
             return { ok: true, eventId: String(eventId) }
           }
         },
-    net,
+    net: o.native ? makeNativeNet(net, o.native) : net,
+    // 只有显式开启 native 时才提供 ctx.fs —— 默认保持「旧宿主」形态，
+    // 这样 `folderSupported()` 为 false，能验证插件不会在旧宿主上露出新选项
+    fs: o.native ? makeNativeFs(o.native) : undefined,
     dispose(fn) {
       records.disposers.push(fn)
     }
@@ -899,6 +991,35 @@ async function main() {
   eq(I.qualityMatch({ quality: 'flac' }, '320'), false, 'flac 不算 320')
   eq(I.qualityMatch({}, '128'), true, '128 恒可用')
 
+  // beta.8 起宿主音质枚举扩到 7 档。顺序以宿主 PlayerResolver 的 Df 常量为准：
+  // 128 < 320 < flac < high < viper_clear < viper_tape < viper_atmos
+  // （注意与宿主 UI 下拉框的展示顺序不同，降级序列用的是这个）
+  eq(
+    I.QUALITY_LADDER.join(','),
+    '128,320,flac,high,viper_clear,viper_tape,viper_atmos',
+    '音质阶梯与宿主一致（含 2 档蝰蛇新音质）'
+  )
+  eq(I.qualityMatch({ quality: 'viper_clear' }, 'viper_clear'), true, '蝰蛇超清按 quality 名匹配')
+  eq(I.qualityMatch({ quality: 'viper_atmos' }, 'viper_atmos'), true, '蝰蛇全景声按 quality 名匹配')
+  eq(I.qualityMatch({ quality: 'viper_atmos' }, 'viper_clear'), false, '全景声不算超清')
+  eq(I.qualityMatch({ quality: 'viper_clear' }, 'viper_tape'), false, '超清不算母带')
+  eq(I.QUALITY_LABEL.viper_clear, '蝰蛇超清', '新音质有中文标签')
+  eq(I.QUALITY_LABEL.viper_atmos, '蝰蛇全景声', '新音质有中文标签（全景声）')
+
+  const VIPER_TRACK = {
+    ...FLAC_TRACK,
+    relateGoods: [
+      ...FLAC_TRACK.relateGoods,
+      { hash: 'CLEAR0000CLEAR0000CLEAR0000CLEAR0', quality: 'viper_clear', level: 102 },
+      { hash: 'ATMOS0000ATMOS0000ATMOS0000ATMOS0', quality: 'viper_atmos', level: 103 }
+    ]
+  }
+  eq(
+    I.candidateQualities(VIPER_TRACK, 'auto').slice(0, 3).join(','),
+    'viper_atmos,viper_tape,viper_clear',
+    'auto 优先全景声，并按宿主顺序逐级降级'
+  )
+
   eq(I.availableQualities(FLAC_TRACK.relateGoods).join(','), '128,320,flac', '升序可用音质')
   eq(I.availableQualities([]).join(','), '128', '没有版权信息时只有 128')
   eq(I.candidateQualities(FLAC_TRACK, 'auto').join(','), 'flac,320,128', 'auto = 最高可用并逐级降级')
@@ -930,7 +1051,10 @@ async function main() {
   eq(I.extractUrls(shapes[2])[0], 'https://d.test/x.mp3', 'info.urls 也能取')
   eq(I.extractUrls(shapes[3])[0], 'https://e.test/x.mp3', '裸数组也能取')
   eq(I.extractUrls(shapes[4]).length, 1, '同一地址去重')
-  eq(I.extractUrls({ data: { url: ['https://a.test/cover.jpg'], backup_url: ['https://b.test/song.mp3'] } })[0], 'https://b.test/song.mp3', '图片地址被剔除且音频优先')
+  const urlsWithImage = I.extractUrls({ data: { url: ['https://a.test/cover.jpg'], backup_url: ['https://b.test/song.mp3'] } })
+  eq(urlsWithImage[0], 'https://b.test/song.mp3', '图片地址被剔除且音频优先')
+  // 只看 [0] 不够：排序会把 mp3 排到前面，即使根本没做图片过滤也「恰好正确」
+  eq(urlsWithImage.includes('https://a.test/cover.jpg'), false, '封面地址根本不进候选（排序掩盖不了过滤缺失）')
   eq(I.extractUrls({}).length, 0, '空载荷返回空数组')
   eq(I.extFromUrl('https://x.test/a/b.flac?sign=1'), 'flac', '从 URL 取扩展名（忽略 query）')
   eq(I.pickExt({ data: { extName: 'mp3' } }, 'https://x.test/a.bin'), 'mp3', '优先用上游 extName')
@@ -1294,6 +1418,9 @@ async function main() {
     net.mode = 'range'
     net.file = makeBytes(2 * 1024 * 1024, 41)
     const rsTask = (await apiOut.startDownloads([FLAC_TRACK], 'auto'))[0]
+    // 直接断言身份：返回原始对象时 patch() 改的是 target 而不是 proxy，
+    // 界面不会收到通知（heartbeat 会掩盖这一点，让下面的渲染断言误判为通过）
+    ok(V.isProxy(rsTask), 'createTask 返回的是响应式代理（否则 patch 不触发界面）')
     await waitFor(() => rsTask.status === 'done', '响应式用例里的任务完成')
     await tick()
     stop()
@@ -1498,16 +1625,23 @@ async function main() {
   {
     const cssPath = process.env.SD_CSS_ENTRY ? path.resolve(process.env.SD_CSS_ENTRY) : path.join(ROOT, 'song-downloader', 'style.css')
     const css = fs.readFileSync(cssPath, 'utf8')
-    const blockOf = (selector) => {
-      const i = css.indexOf('\n' + selector + ' {')
-      if (i < 0) return null
-      const end = css.indexOf('}', i)
-      return css.slice(i, end)
+    // ⚠️ 同一选择器可能在 CSS 里出现多次（这里 `.sd-settings` 就有一处合并规则 + 一处独立规则），
+    // 只 indexOf 第一处会让后面的变异悄悄漏过 —— 收集**全部**块再断言。
+    const blocksOf = (selector) => {
+      const out = []
+      let i = -1
+      while ((i = css.indexOf('\n' + selector + ' {', i + 1)) >= 0) {
+        const end = css.indexOf('}', i)
+        out.push(css.slice(i, end))
+      }
+      return out
     }
-    const settings = blockOf('.sd-settings')
-    const pageBlock = blockOf('.sd-page')
-    ok(!!settings, '找得到 .sd-settings 规则')
-    ok(!!pageBlock, '找得到 .sd-page 规则')
+    const settingsBlocks = blocksOf('.sd-settings')
+    const pageBlocks = blocksOf('.sd-page')
+    ok(settingsBlocks.length > 0, '找得到 .sd-settings 规则', { count: settingsBlocks.length })
+    ok(pageBlocks.length > 0, '找得到 .sd-page 规则', { count: pageBlocks.length })
+    const settings = settingsBlocks.join('\n')
+    const pageBlock = pageBlocks.join('\n')
     // 这就是 1.0.0 的 bug：设置根节点自带 height:100% + overflow-y:auto，
     // 在宿主的弹窗滚动容器里会变成「自己高度=内容高度 → 谁也不滚」。
     eq(/height\s*:\s*100%/.test(settings), false, '设置根节点不能写 height:100%（否则宿主弹窗里整页滚不动）')
@@ -1544,7 +1678,9 @@ async function main() {
     '自动（最优可用）',
     '音质选项里有「自动」'
   )
-  eq(findAllByProp(dTree, 'data-group', 'quality').length, 6, '6 档音质')
+  eq(findAllByProp(dTree, 'data-group', 'quality').length, 8, '8 档音质（含蝰蛇超清 / 全景声）')
+  includes(textOf(dTree), '蝰蛇超清', '音质选项含「蝰蛇超清」（beta.8 新增）')
+  includes(textOf(dTree), '蝰蛇全景声', '音质选项含「蝰蛇全景声」（beta.8 新增）')
   eq(findAllByProp(dTree, 'data-group', 'dest').length, 2, '2 个保存位置选项')
   eq(findByProp(dTree, 'data-role', 'dlg-preview') !== null, true, '渲染了文件名预览')
   includes(textOf(dTree), '将保存为：', '预览文案')
@@ -1945,6 +2081,25 @@ async function main() {
   apiOut.closeDownloadDialog()
   first.records.resetPlayerState()
 
+  // 非当前曲目：即使 player store 里有 currentAudioUrl，也**不能**拿来当这首的地址
+  // （否则下载的是别的歌，或者那个地址早就失效）
+  first.records.currentTrack.value = FLAC_TRACK
+  first.records.setPlayerState({
+    currentTrackId: 'song-other',
+    currentAudioUrl: 'https://cdn.test/other-stream.flac',
+    currentAudioCandidateUrls: [],
+    currentResolvedAudioQuality: 'flac'
+  })
+  api.calls.length = 0
+  const otherResolved = await apiOut.resolveAudio(FLAC_TRACK, 'auto')
+  eq(
+    String((otherResolved.urls || [])[0] || '').includes('other-stream'),
+    false,
+    '非当前曲目不复用宿主的 currentAudioUrl'
+  )
+  ok(api.calls.length >= 1, '非当前曲目老老实实自己去请求上游')
+  first.records.resetPlayerState()
+
   /* -------------------------------------------------- 29. 标题栏「任务中心」 */
   section('29. 同步到标题栏任务中心（进度 / 操作 / 保留策略）')
   await waitFor(() => apiOut.state.tasks.every((t) => t.status !== 'downloading' && t.status !== 'resolving' && t.status !== 'saving'), '先等任务收敛')
@@ -2041,10 +2196,18 @@ async function main() {
   eq(center.records.taskHandles.every((h) => !h.active) || activeHandles.length === 0, true, '清空已完成后面板不再留条目')
 
   // 关掉开关 → 现有条目全摘掉，之后不再注册
+  // 先造一个「已完成但条目还挂在面板上」的任务 —— 否则清场逻辑没有可观察对象，
+  // 把 dismissAllCenterTasks() 删掉也测不出来（变异测试踩过）。
+  net.file = makeBytes(200 * 1024, 73)
+  const liveTask = (await centerApi.startDownloads([FLAC_TRACK], 'auto'))[0]
+  await waitFor(() => liveTask.status === 'done', '关开关前先造一个仍挂在面板上的条目')
+  const liveHandle = center.records.taskHandles[center.records.taskHandles.length - 1]
+  eq(liveHandle.active, true, '该条目当前仍在面板上')
   const defsBefore = center.records.taskDefs.length
   centerApi.state.settings.taskCenter = false
   centerApi.applyTaskCenter(false)
-  eq(center.records.taskHandles.every((h) => !h.active), true, '关掉开关时把已有条目全摘掉')
+  eq(liveHandle.active, false, '关掉开关时把已有条目摘掉')
+  eq(center.records.taskHandles.every((h) => !h.active), true, '关掉开关后没有残留条目')
   const offTask = (await centerApi.startDownloads([FLAC_TRACK], 'auto'))[0]
   await waitFor(() => offTask.status === 'done', '关掉后仍能下载')
   eq(center.records.taskDefs.length, defsBefore, '关掉后不再往任务中心注册')
@@ -2303,7 +2466,8 @@ async function main() {
     status: 'downloading',
     loaded: 1000,
     total: 100000,
-    speed: 2000, // 2000 B/s
+    speed: 10000, // 10 KB/s：1 秒的外推量（10 KB）必须**超过**封顶（一个分片的 90% = 4.5 KB），
+    // 否则封顶分支根本走不到，把上限拿掉也测不出来（变异测试踩过）
     chunkBytes: 5000,
     progressAt: Date.now() - 1000 // 上一次真实更新在 1 秒前
   }
@@ -2369,8 +2533,12 @@ async function main() {
   const cssText = fs.readFileSync(process.env.SD_CSS_ENTRY || path.join(ROOT, 'song-downloader', 'style.css'), 'utf8')
   const fillRule = /\.sd-bar-fill\s*\{[^}]*\}/.exec(cssText)
   ok(!!fillRule, '找得到 .sd-bar-fill 规则')
-  includes(fillRule ? fillRule[0] : '', 'transition', '.sd-bar-fill 有过渡')
-  includes(fillRule ? fillRule[0] : '', 'linear', '过渡是 linear（与快心跳同周期，首尾相接才连续）')
+  // 注意：不能只断言块里出现 'transition' 与 'linear' —— 变异体会写成 `transition: none`，
+  // 而 `background: linear-gradient(...)` 里本来就含 "linear"，两条都会假通过。
+  ok(
+    /transition\s*:\s*width\s+\d+ms\s+linear/.test(fillRule ? fillRule[0] : ''),
+    '过渡是 width <ms> linear（与快心跳同周期，首尾相接才连续）'
+  )
 
   /* -------------------------------------------------- 25. dispose 回收 */
   section('25. dispose 回收在跑的任务与全局监听')
@@ -2386,6 +2554,104 @@ async function main() {
   await mod.deactivate()
   eq(typeof mod.deactivate, 'function', 'deactivate 可调用')
 
+  /* ------------------------------------------ 26. 目录模式（beta.10 新 API） */
+  section('26. 目录模式：授权文件夹 + 主进程流式下载')
+  const nativeRec = { requestDirectoryCalls: [], downloadCalls: [], cancelCalls: 0 }
+  const nativeSpec = { records: nativeRec, bytes: 2 * 1024 * 1024 }
+  const nativeCtx = makeCtx({ native: nativeSpec })
+  const nativeApi = await mod.activate(nativeCtx.ctx)
+  const nativeSettingsPanel = nativeCtx.records.settings[0].component
+
+  // ① 能力探测：有 ctx.fs + ctx.net.download 时才出现 folder 选项
+  let nTree = renderOf(nativeSettingsPanel)
+  const saveModeSelect = walk(findByProp(nTree, 'data-setting', 'saveMode')).find((n) => n.props && n.props.tag === 'select') ||
+    walk(findByProp(nTree, 'data-setting', 'saveMode')).find((n) => n.type === 'select')
+  ok(!!saveModeSelect, '设置面板里有「保存方式」下拉')
+  eq(
+    walk(saveModeSelect).some((n) => n.props && n.props.value === 'folder'),
+    true,
+    '宿主支持新 API 时出现「下载到指定文件夹」'
+  )
+  // 支持新 API 时「保存文件夹」入口始终在（否则用户没有授权入口），未授权只是文案不同
+  const unsavedRow = findByProp(nTree, 'data-setting', 'saveDir')
+  ok(!!unsavedRow, '支持时始终显示「保存文件夹」入口行')
+  includes(textOf(unsavedRow), '还没有选择文件夹', '未授权时提示还没选')
+  includes(textOf(unsavedRow), '选择文件夹', '未授权时按钮是「选择文件夹」')
+
+  // ② 授权：参数必须是只读以外的读写 + 有 purpose + persist
+  await nativeApi.pickSaveDirectory()
+  await tick()
+  eq(nativeRec.requestDirectoryCalls.length, 1, '调了一次 requestDirectory')
+  eq(nativeRec.requestDirectoryCalls[0].access, 'read-write', '申请读写权限')
+  includes(String(nativeRec.requestDirectoryCalls[0].purpose), '下载', '用途文案会出现在系统选择器标题里')
+  eq(nativeRec.requestDirectoryCalls[0].persist, true, '授权持久化')
+  eq(nativeApi.state.saveDir.id, 'dir-1', '目录引用按 id 保存（不落绝对路径）')
+  eq(nativeApi.state.settings.saveMode, 'folder', '授权后自动切到文件夹模式')
+  eq(nativeCtx.records.storage.get('saveDirectory').id, 'dir-1', '目录引用写进了 storage')
+  eq(
+    JSON.stringify(nativeCtx.records.storage.get('saveDirectory')).includes('D:/Music'),
+    true,
+    'displayPath 仅作为显示字段一起保存'
+  )
+  nTree = renderOf(nativeSettingsPanel)
+  const saveDirRow = findByProp(nTree, 'data-setting', 'saveDir')
+  ok(!!saveDirRow, '授权后出现文件夹明细行')
+  includes(textOf(saveDirRow), 'D:/Music', '明细行显示授权目录')
+
+  // ③ 确认框默认落在已授权文件夹上
+  const nDlg = nativeApi.openDownloadDialog([FLAC_TRACK])
+  ok(!!nDlg, '确认框打开')
+  eq(nativeApi.dlg.destination, 'folder', '默认保存位置 = 已授权文件夹')
+  const nDialogComponent = nativeCtx.records.teleports[0].component
+  const nDlgTree = renderOf(nDialogComponent)
+  ok(!!findOption(nDlgTree, 'dest', 'folder'), '确认框里有「已授权文件夹」选项')
+  includes(textOf(nDlgTree), 'D:/Music', '确认框显示目标路径')
+  nativeApi.closeDownloadDialog()
+
+  // ④ 走主进程流式下载：不产生 Blob，字节由宿主写盘
+  lastBlob = null
+  doc.clicks.length = 0
+  const preResolved = {
+    ok: true,
+    urls: ['https://cdn.test/song.flac'],
+    quality: 'flac',
+    ext: 'flac',
+    source: 'api',
+    attempts: []
+  }
+  await nativeApi.startDownloads([FLAC_TRACK], 'flac', { saveMode: 'folder', preResolved })
+  await waitFor(() => nativeApi.state.tasks[0] && nativeApi.state.tasks[0].status === 'done', '目录模式任务完成')
+  const nativeTask = nativeApi.state.tasks[0]
+  eq(nativeTask.saveMethod, 'native', '落盘方式标记为 native（宿主主进程）')
+  eq(nativeTask.fileName, '涂一乐 - 花落叹.flac', '文件名仍按模板生成')
+  eq(nativeTask.bytes, 2 * 1024 * 1024, '字节数取自宿主快照')
+  eq(nativeTask.error, '', '没有错误')
+  eq(nativeRec.downloadCalls.length, 1, '调了一次 ctx.net.download')
+  const dlCall = nativeRec.downloadCalls[0]
+  eq(dlCall.url, 'https://cdn.test/song.flac', '用解析出的直链')
+  eq(dlCall.target.directoryId, 'dir-1', '目标是目录 id（不是裸路径）')
+  eq(dlCall.target.relativePath, '涂一乐 - 花落叹.flac', '相对路径 = 模板文件名')
+  eq(dlCall.conflict, 'rename', '重名自动改名，不覆盖已有文件')
+  eq(lastBlob, null, '完全没有产生 Blob')
+  eq(doc.clicks.length, 0, '没有走 <a download> 兜底')
+  eq(nativeCtx.records.storage.get('history')[0].file, '涂一乐 - 花落叹.flac', '历史记录写的是宿主返回的实际文件名')
+
+  // ⑤ 授权失效：明确报错，而不是静默失败
+  nativeSpec.grants = []
+  await nativeApi.startDownloads([FLAC_TRACK], 'flac', { saveMode: 'folder', preResolved })
+  await waitFor(() => nativeApi.state.tasks[1] && nativeApi.state.tasks[1].status === 'failed', '授权失效时任务失败')
+  includes(nativeApi.state.tasks[1].error, '授权已失效', '错误文案提示重新选择文件夹')
+
+  // ⑥ 旧宿主（没有 ctx.fs / ctx.net.download）不暴露新选项
+  eq(
+    renderOf(settingsPanel) &&
+      walk(findByProp(renderOf(settingsPanel), 'data-setting', 'saveMode')).some((n) => n.props && n.props.value === 'folder'),
+    false,
+    '旧宿主上不出现 folder 选项'
+  )
+
+  if (nativeCtx.records.disposers[0]) nativeCtx.records.disposers[0]()
+
   /* ------------------------------------------------------------- 收尾 */
   clearAllIntervals()
   say('\n===== 歌曲下载 smoke =====')
@@ -2393,15 +2659,30 @@ async function main() {
   if (failures.length) {
     say('失败：' + failures.length)
     for (const f of failures) say('  ✗ ' + f)
-    process.exitCode = 1
   } else {
     say('全部通过 ✓')
   }
   flushReport()
+  exitNow(failures.length ? 1 : 0)
+}
+
+/**
+ * 显式收尾（技能 50 / AGENTS 第 10 节）：
+ * 插件 activate() 里起的 setInterval 在无头环境不会清理；一旦断言中途抛错，
+ * disposer 就不会跑到，事件循环永不空闲 —— 变异测试会卡死在某个变异体上。
+ */
+function exitNow(code) {
+  process.exitCode = code
+  const done = () => process.exit(code)
+  if (process.stdout.writableLength === 0) done()
+  else {
+    process.stdout.once('drain', done)
+    setTimeout(done, 300).unref()
+  }
 }
 
 main().catch((e) => {
   say('测试进程异常：' + (e && e.stack ? e.stack : String(e)))
   flushReport()
-  process.exitCode = 1
+  exitNow(1)
 })

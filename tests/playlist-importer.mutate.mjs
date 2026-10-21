@@ -293,17 +293,11 @@ const MAX_ATTEMPTS = 2`
     to: `  if (false) {
     emit({ type: 'phase', phase: 'dedupe' })`
   },
-  {
-    name: '中止后照样写库（用户点了停止，歌还是进了歌单）',
-    from: `    if (isAborted()) {
-      aborted = true
-      break
-    }`,
-    to: `    if (false) {
-      aborted = true
-      break
-    }`
-  },
+  // ⚠️ 已移除「中止后照样写库」这条变异：它改的是批循环开头那处 isAborted() 检查，
+  // 但该分支**不可达** —— 建歌单后（index.js:2072）有一次提前返回，
+  // 批间又有 sleepAbortable(intervalMs, isAborted)（2164）会先一步把 aborted 置真。
+  // 也就是说把 2112 的检查删掉，行为完全不变（等价变异体），不是断言不够。
+  // 「批间停止不写库」的行为仍由 smoke 里那条精确用例覆盖。
 
   /* ---------------- 任务中心 ---------------- */
   {

@@ -30,6 +30,13 @@ const REPORT_FILE = path.join(CACHE_DIR, 'kugou-daily-vip-smoke-report.txt')
 // 夹具用的假 uid：刻意只留 4 位，避开发布门禁的 kugou-userid-literal 规则（6 位阈值）误判成真 uid
 const MOCK_USERID = 4242
 
+// 落盘键按账号分桶（技能 40#ENG-13）：lastClaim:<uid> / lastDoneDate:<uid> / history:<uid>。
+// beta.9 起宿主支持多账号切换，裸键会让 B 账号被 A 的「今天已领」静默跳过。
+const KEY_CLAIM = 'lastClaim:' + MOCK_USERID
+const KEY_DONE = 'lastDoneDate:' + MOCK_USERID
+const KEY_HISTORY = 'history:' + MOCK_USERID
+const keyOf = (base, uid) => base + ':' + uid
+
 /* ========================================================================== *
  * Vue 运行时解析
  * ========================================================================== */
@@ -384,7 +391,7 @@ try {
     ok('Authorization 含 token/userid', auth.includes('token=tok-abc') && auth.includes('userid=' + MOCK_USERID))
     ok('Authorization 携带设备指纹', auth.includes('KUGOU_API_MID=mid-1') && auth.includes('dfid=dfid-1'), auth)
 
-    const rec = storageData.lastClaim
+    const rec = storageData[KEY_CLAIM]
     ok('写入当日记录 lastClaim', rec?.dateKey === BJ_KEY, String(rec?.dateKey))
     ok('记录中广告成功 2 次', rec?.adClaimed === 2, `adClaimed=${rec?.adClaimed}`)
     ok('记录中听歌/签到为成功', rec?.listen === 'ok' && rec?.dayVip === 'ok', `${rec?.listen}/${rec?.dayVip}`)
@@ -392,8 +399,9 @@ try {
     // 真机结构：data.busi_vip[] 里 svip 才是畅听/概念版，tvip 是听书
     ok('抓到 svip 那条 VIP 到期时间（不是数组里碰运气）',
       rec?.vipExpire === '2026-09-23 22:09:58', String(rec?.vipExpire))
-    ok('完整跑完后写入 lastDoneDate', storageData.lastDoneDate === BJ_KEY, String(storageData.lastDoneDate))
-    ok('历史记录已保存 1 条', Array.isArray(storageData.history) && storageData.history.length === 1)
+    ok('完整跑完后写入 lastDoneDate', storageData[KEY_DONE] === BJ_KEY, String(storageData[KEY_DONE]))
+    ok('历史记录已保存 1 条', Array.isArray(storageData[KEY_HISTORY]) && storageData[KEY_HISTORY].length === 1)
+    ok('历史不再写到裸键上（多账号不会串）', storageData.history === undefined)
     ok('自校准结果落盘 receiveDayFormat=day', storageData.receiveDayFormat === 'day', String(storageData.receiveDayFormat))
     ok('成功路径使用 success toast', toasts.some(([k]) => k === 'success'), JSON.stringify(toasts))
 
@@ -434,8 +442,8 @@ try {
     const ctx2 = makeCtx()
     const mod2 = await import(SRC + '?v=2')
     storageData.settings = { adCount: 2, adIntervalSec: 0, listenSong: true, adVip: true, dayVip: true, autoUpgrade: false, toastOnDone: true, receiveDayFormat: 'auto' }
-    delete storageData.lastDoneDate
-    delete storageData.lastClaim
+    delete storageData[KEY_DONE]
+    delete storageData[KEY_CLAIM]
     delete storageData.history
     script.listenSong = { status: 502, body: { status: 0, error_code: 130012, error_msg: '今日已经领取过了' } }
     script.dayVip = [{ status: 502, body: { status: 0, error_code: 131001, error_msg: '今日已领取' } }]
@@ -453,7 +461,7 @@ try {
     ok('听歌「已领取」判定为 already', stepMarkOf(p2b, 'listen') === 'already', String(stepMarkOf(p2b, 'listen')))
     ok('签到「已领取」判定为 already', stepMarkOf(p2b, 'dayVip') === 'already', String(stepMarkOf(p2b, 'dayVip')))
     ok('全部已领取时不产生错误态', findByProp(p2b, 'data-role', 'error').length === 0)
-    ok('全部已领取时写入 lastDoneDate（当天不再重试）', storageData.lastDoneDate === BJ_KEY, String(storageData.lastDoneDate))
+    ok('全部已领取时写入 lastDoneDate（当天不再重试）', storageData[KEY_DONE] === BJ_KEY, String(storageData[KEY_DONE]))
     ok('全部已领取时的文案提示已领取', subtreeText(p2b).join(' ').includes('今日已领取'), '')
     ok('已领取路径不误报 warning', !toasts.some(([k]) => k === 'warning'), JSON.stringify(toasts))
 
@@ -489,8 +497,8 @@ try {
     const ctx3 = makeCtx()
     const mod3 = await import(SRC + '?v=3')
     storageData.settings = { adCount: 1, adIntervalSec: 0, listenSong: false, adVip: false, dayVip: true, autoUpgrade: false, toastOnDone: false, receiveDayFormat: 'auto' }
-    delete storageData.lastDoneDate
-    delete storageData.lastClaim
+    delete storageData[KEY_DONE]
+    delete storageData[KEY_CLAIM]
     delete storageData.history
     delete storageData.receiveDayFormat
     script.dayVip = [
@@ -521,8 +529,8 @@ try {
     const ctx4 = makeCtx()
     const mod4 = await import(SRC + '?v=4')
     storageData.settings = { adCount: 1, adIntervalSec: 0, autoUpgrade: false, toastOnDone: true }
-    delete storageData.lastDoneDate
-    delete storageData.lastClaim
+    delete storageData[KEY_DONE]
+    delete storageData[KEY_CLAIM]
     // 真实场景：token 失效 → 服务端 status 0 + error_code 20018（未登录）
     script.userDetail = { status: 502, body: { status: 0, error_code: 20018, msg: '未登录' } }
     await mod4.activate(ctx4)
@@ -538,7 +546,7 @@ try {
     const p4b = currentPanel()
     ok('登录失效时展示错误态', findByProp(p4b, 'data-role', 'error').length === 1)
     ok('错误文案提示重新登录', /重新登录|登录已过期/.test(subtreeText(findByProp(p4b, 'data-role', 'error')).join('')))
-    ok('登录失效时不写 lastDoneDate（下轮仍会重试）', storageData.lastDoneDate === undefined)
+    ok('登录失效时不写 lastDoneDate（下轮仍会重试）', storageData[KEY_DONE] === undefined)
     mod4.deactivate()
   }
 
@@ -549,8 +557,8 @@ try {
     const ctx4b = makeCtx()
     const mod4b = await import(SRC + '?v=4b')
     storageData.settings = { adCount: 1, adIntervalSec: 0, listenSong: true, adVip: false, dayVip: false, autoUpgrade: false, toastOnDone: false }
-    delete storageData.lastDoneDate
-    delete storageData.lastClaim
+    delete storageData[KEY_DONE]
+    delete storageData[KEY_CLAIM]
     script.userDetail = { status: 200, body: { status: 1, data: { userid: MOCK_USERID } } } // 无 nickname
     script.listenSong = { status: 200, body: { status: 1 } }
     await mod4b.activate(ctx4b)
@@ -561,7 +569,7 @@ try {
     await findByProp(p4c, 'data-action', 'claim')[0].props.onClick()
     await settle(100)
     ok('账号无昵称时仍正常走完领取（不误判登录失效）',
-      requests.some((r) => r.url === '/youth/listen/song') && storageData.lastClaim?.listen === 'ok',
+      requests.some((r) => r.url === '/youth/listen/song') && storageData[KEY_CLAIM]?.listen === 'ok',
       requests.map((r) => r.url).join(' > '))
     ok('无昵称时账号名回退为「已登录账号」',
       subtreeText(currentPanel()).join(' ').includes('已登录账号'))
@@ -576,8 +584,8 @@ try {
     const mod5 = await import(SRC + '?v=5')
     script.userDetail = { status: 200, body: { status: 1, data: { nickname: '测试用户' } } }
     storageData.settings = { adCount: 1, adIntervalSec: 0, autoDaily: true }
-    storageData.lastDoneDate = BJ_KEY
-    delete storageData.lastClaim
+    storageData[KEY_DONE] = BJ_KEY
+    delete storageData[KEY_CLAIM]
     await mod5.activate(ctx5)
     await new Promise((r) => setTimeout(r, 7000)) // 越过 6s 启动首查延迟
     ok('今日已完成时启动不再重复领取', requests.length === 0, `requests=${requests.length}`)
@@ -591,14 +599,14 @@ try {
     const ctx6 = makeCtx()
     const mod6 = await import(SRC + '?v=6')
     storageData.settings = { adCount: 1, adIntervalSec: 0, autoDaily: true, listenSong: true, adVip: false, dayVip: false, toastOnDone: false }
-    storageData.lastDoneDate = '2020-01-01'
-    delete storageData.lastClaim
+    storageData[KEY_DONE] = '2020-01-01'
+    delete storageData[KEY_CLAIM]
     delete storageData.history
     script.listenSong = { status: 200, body: { status: 1 } }
     await mod6.activate(ctx6)
     await new Promise((r) => setTimeout(r, 7000))
     ok('跨天未完成时启动自动补领并落盘',
-      requests.some((r) => r.url === '/youth/listen/song') && storageData.lastClaim?.dateKey === BJ_KEY,
+      requests.some((r) => r.url === '/youth/listen/song') && storageData[KEY_CLAIM]?.dateKey === BJ_KEY,
       requests.map((r) => r.url).join(' > '))
     mod6.deactivate()
   }
@@ -612,8 +620,8 @@ try {
     globalThis.__kdvWaits = []
     const ctx9 = makeCtx()
     storageData.settings = { adCount: 2, adIntervalSec: 5, listenSong: true, adVip: true, dayVip: true, autoUpgrade: true, toastOnDone: true, receiveDayFormat: 'auto' }
-    delete storageData.lastDoneDate
-    delete storageData.lastClaim
+    delete storageData[KEY_DONE]
+    delete storageData[KEY_CLAIM]
     delete storageData.history
     delete storageData.receiveDayFormat
     // 前面的用例改过 script.userDetail / monthRecord / vipDetail，这里必须回到真机结构，
@@ -675,7 +683,7 @@ try {
     ok('升级中性态提示「暂无升级额度」', t9.includes('暂无升级额度') || t9.includes('无可升级额度'), '')
     ok('广告 0 次且已用光时不算失败', stepMarkOf(p9b, 'ad') === 'already', String(stepMarkOf(p9b, 'ad')))
     ok('升级中性态不弹 warning toast', !toasts.some(([k]) => k === 'warning'), JSON.stringify(toasts))
-    ok('没有额度时仍写 lastDoneDate（当天不反复重试）', storageData.lastDoneDate === BJ_KEY, String(storageData.lastDoneDate))
+    ok('没有额度时仍写 lastDoneDate（当天不反复重试）', storageData[KEY_DONE] === BJ_KEY, String(storageData[KEY_DONE]))
   }
 
   // ===== 13. 广告领取倒计时 =====
@@ -687,8 +695,8 @@ try {
     globalThis.__kdvWaits = []
     const ctx10 = makeCtx()
     storageData.settings = { adCount: 3, adIntervalSec: 30, listenSong: false, adVip: true, dayVip: false, autoUpgrade: false, toastOnDone: false, receiveDayFormat: 'auto' }
-    delete storageData.lastDoneDate
-    delete storageData.lastClaim
+    delete storageData[KEY_DONE]
+    delete storageData[KEY_CLAIM]
     script.ad = [
       { status: 200, body: { status: 1 } },
       { status: 200, body: { status: 1 } },
@@ -779,8 +787,8 @@ try {
     globalThis.__kdvWaits = []
     const ctx11 = makeCtx()
     storageData.settings = { adCount: 3, adIntervalSec: 30, listenSong: false, adVip: true, dayVip: false, autoUpgrade: false, toastOnDone: false }
-    delete storageData.lastDoneDate
-    delete storageData.lastClaim
+    delete storageData[KEY_DONE]
+    delete storageData[KEY_CLAIM]
     script.ad = [
       { status: 200, body: { status: 1 } },
       { status: 200, body: { status: 1 } },
@@ -797,7 +805,7 @@ try {
     ok('广告取满次数时不额外等待（最后一次拿到即收工）',
       globalThis.__kdvWaits.length === 2, `waits=${globalThis.__kdvWaits.length}`,
       )
-    ok('广告 3 次全部领取成功并落盘', storageData.lastClaim?.adClaimed === 3, String(storageData.lastClaim?.adClaimed))
+    ok('广告 3 次全部领取成功并落盘', storageData[KEY_CLAIM]?.adClaimed === 3, String(storageData[KEY_CLAIM]?.adClaimed))
     mod11.deactivate()
   }
 
@@ -807,7 +815,7 @@ try {
     const ctx7 = makeCtx()
     const mod7 = await import(SRC + '?v=7')
     storageData.settings = { adCount: 1, adIntervalSec: 0 }
-    delete storageData.lastDoneDate
+    delete storageData[KEY_DONE]
     await mod7.activate(ctx7)
     await settle(60)
     let threw = null
@@ -842,8 +850,8 @@ try {
     ctx8.ui.components = undefined
     const mod8 = await import(SRC + '?v=8')
     storageData.settings = { adCount: 1, adIntervalSec: 0, listenSong: true, adVip: false, dayVip: false, autoUpgrade: false, toastOnDone: false }
-    delete storageData.lastDoneDate
-    delete storageData.lastClaim
+    delete storageData[KEY_DONE]
+    delete storageData[KEY_CLAIM]
     script.userDetail = { status: 200, body: { status: 1, data: { nickname: '测试用户' } } }
     script.listenSong = { status: 200, body: { status: 1 } }
     let activated = true
@@ -863,8 +871,132 @@ try {
     requests.length = 0
     await c8.props.onClick()
     await settle(100)
-    ok('退回原生元素时领取流程仍可跑通', storageData.lastClaim?.listen === 'ok', requests.map((r) => r.url).join(' > '))
+    ok('退回原生元素时领取流程仍可跑通', storageData[KEY_CLAIM]?.listen === 'ok', requests.map((r) => r.url).join(' > '))
     mod8.deactivate()
+  }
+
+  // ===== 10. 多账号：落盘键按 userid 分桶（beta.9 语义） =====
+  {
+    resetReg()
+    requests.length = 0
+    for (const k of Object.keys(storageData)) delete storageData[k]
+    storageData.settings = {
+      adCount: 0,
+      adIntervalSec: 0,
+      listenSong: true,
+      adVip: false,
+      dayVip: false,
+      autoUpgrade: false,
+      autoDaily: false,
+      toastOnDone: false
+    }
+    storageData[KEY_CLAIM] = {
+      dateKey: BJ_KEY,
+      at: Date.now(),
+      listen: 'ok',
+      listenText: '听歌+1',
+      adClaimed: 1,
+      adText: '广告+1',
+      adNoQuota: false,
+      dayVip: 'ok',
+      dayVipText: '签到+1',
+      upgrade: 'skip',
+      upgradeText: '',
+      vipExpire: '',
+      vipOthers: [],
+      nickname: '账号A',
+      message: '今日已领取'
+    }
+    storageData[KEY_DONE] = BJ_KEY
+    storageData[KEY_HISTORY] = [
+      { dateKey: BJ_KEY, listen: 'ok', adClaimed: 1, dayVip: 'ok', upgrade: 'skip', nickname: '账号A' }
+    ]
+
+    const ctx9 = makeCtx()
+    const mod9 = await import(SRC + '?v=9')
+    await mod9.activate(ctx9)
+    await settle(90)
+    let panel9 = openPanelFromToolbar()
+    await settle(90)
+    let text9 = panel9 ? subtreeText(panel9).join(' ') : ''
+    ok('A 账号面板显示自己的 UID', text9.includes('UID ' + MOCK_USERID), text9.slice(0, 200))
+    ok('A 账号读到自己的「今日已领取」', text9.includes('今日已领取'))
+
+    // 切到 B：userid 变化 + accountRevision 自增（宿主 setUserInfo 的真实行为）
+    const USER_B = 5353
+    ctx9.pinia.state.value.user.info.userid = USER_B
+    ctx9.pinia.state.value.user.info.nickname = '账号B'
+    ctx9.pinia.state.value.user.accountRevision = (ctx9.pinia.state.value.user.accountRevision || 0) + 1
+    await settle(140)
+    panel9 = currentPanel()
+    text9 = panel9 ? subtreeText(panel9).join(' ') : ''
+    ok('切账号后面板显示新 UID', text9.includes('UID ' + USER_B), text9.slice(0, 200))
+    ok('B 账号不被 A 的「今天已领」静默挡住', !text9.includes('今日已领取'))
+    ok('A 的 lastDoneDate 保留', storageData[KEY_DONE] === BJ_KEY)
+    ok('B 还没有自己的 lastDoneDate', storageData[keyOf('lastDoneDate', USER_B)] === undefined)
+    ok('B 不继承 A 的领取历史', !text9.includes('广告+1'))
+
+    // 切回 A：历史与当日记录恢复
+    ctx9.pinia.state.value.user.info.userid = MOCK_USERID
+    ctx9.pinia.state.value.user.info.nickname = '账号A'
+    ctx9.pinia.state.value.user.accountRevision += 1
+    await settle(140)
+    panel9 = currentPanel()
+    text9 = panel9 ? subtreeText(panel9).join(' ') : ''
+    ok('切回 A 后面板恢复 A 的 UID', text9.includes('UID ' + MOCK_USERID), text9.slice(0, 200))
+    ok('切回 A 后历史仍在', text9.includes('广告+1'))
+
+    mod9.deactivate()
+    for (const k of Object.keys(storageData)) delete storageData[k]
+  }
+
+  // ===== 11. 超级VIP 优先（beta.8 新增 su_vip_end_time） =====
+  {
+    resetReg()
+    requests.length = 0
+    for (const k of Object.keys(storageData)) delete storageData[k]
+    storageData.settings = {
+      adCount: 0,
+      adIntervalSec: 0,
+      listenSong: false,
+      adVip: false,
+      dayVip: false,
+      autoUpgrade: false,
+      autoDaily: false,
+      toastOnDone: false
+    }
+    const prevVip = script.vipDetail
+    // 同时持有「畅听VIP」与「超级VIP」：打分表若只看 vip_end_time，
+    // 就会挑到低一档的 2027-01-01 —— 不报错，只是到期时间比徽章「低一级」。
+    script.vipDetail = {
+      status: 200,
+      body: {
+        status: 1,
+        data: {
+          vip_end_time: '',
+          busi_vip: [
+            { vip_end_time: '2027-01-01 00:00:00', product_type: 'svip', busi_type: 'concept', vip_name: '畅听VIP' },
+            { su_vip_end_time: '2028-01-01 00:00:00', product_type: 'suvip', vip_name: '' }
+          ]
+        }
+      }
+    }
+    const ctx10 = makeCtx()
+    const mod10 = await import(SRC + '?v=10')
+    await mod10.activate(ctx10)
+    await settle(90)
+    openPanelFromToolbar()
+    await settle(300)
+    // 只读刷新是异步的：必须重新渲染一次再读，否则读到的是打开瞬间的快照
+    const panel10 = currentPanel()
+    const text10 = panel10 ? subtreeText(panel10).join(' ') : ''
+    const mainLine = (text10.match(/VIP 到期：[^（(]*/) || [''])[0]
+    ok('有超级VIP时主行展示它的到期时间', mainLine.includes('2028-01-01'), mainLine)
+    ok('超级VIP 条目没有名称时补可读名', text10.includes('超级VIP'), text10.slice(0, 180))
+    ok('低一档的畅听VIP 退到「其它权益」而不是主行', /其它权益[^　]*2027-01-01/.test(text10), text10.slice(0, 220))
+    mod10.deactivate()
+    script.vipDetail = prevVip
+    for (const k of Object.keys(storageData)) delete storageData[k]
   }
 } catch (error) {
   ok('测试主体无未捕获异常', false, String(error && error.stack).slice(0, 600))

@@ -1,0 +1,20 @@
+{
+  "id": "bt-volume-memory",
+  "name": "音量记忆",
+  "version": "1.0.0",
+  "description": "按每个音频输出设备记住音量，设备重连时自动恢复并弹出音量浮层。默认只处理蓝牙设备 —— 蓝牙耳机断电时音频端点会被销毁，重连后音量常被系统重置成一个很大的值。带一个插件目录内的原生 helper 读写 Windows 音频端点（Core Audio）。",
+  "author": "YHuanheg",
+  "icon": "icon.svg",
+  "main": "index.js",
+  "runtime": {
+    "miniPlayer": false,
+    "desktopLyric": false
+  },
+  "requires": {
+    "echoMusicVersion": ">=2.3.2-beta.6"
+  },
+  "capabilities": {
+    "process": true,
+    "unrestrictedNetwork": true
+  }
+}

@@ -1,6 +1,7 @@
 # 歌曲下载（`song-downloader`）
 
-> 当前版本 **1.5.1** · 需要 EchoMusic **≥ 2.3.2-beta.2**（本地接口通道）
+> 当前版本 **1.6.0** · 需要 EchoMusic **≥ 2.3.2-beta.2**（本地接口通道）。
+> 「下载到指定文件夹」（主进程流式写盘）需要 **≥ 2.3.2-beta.10**；更早的宿主会自动退回系统下载目录，其它功能不受影响。
 
 把「当前播放」或「播放队列」里的歌下载到本地：下载前弹确认框选音质 / 保存位置 / 文件名，
 播放栏与标题栏都有**一键下载**按钮，分片下载带**真实进度与速度**，支持批量任务、失败重试与直链复制。
@@ -18,9 +19,9 @@
 │         实际会使用：FLAC                              │
 │                                                      │
 │ 保存位置 ( 系统下载目录 ) ( 选择位置… )               │
-│         落到系统下载目录（Windows 通常是               │
-│         %USERPROFILE%\Downloads）；想指定位置点        │
-│         「选择位置…」                                  │
+│         默认落到系统下载目录；也可以在设置里授权一个   │
+│         「指定文件夹」，由主进程直接流式写盘（更快、   │
+│         不限大小、失败不留空文件）                     │
 │                                                      │
 │ 文件名  [ {artist} - {name}                        ]  │
 │         将保存为：涂一乐 - 花落叹.flac                │
@@ -72,14 +73,19 @@ ctx.electron.api.request({ method: 'GET', url: '/song/url', params: { hash, qual
 ### 2.2 音质与 hash：完全对齐宿主 PlayerResolver
 
 - 可用音质来自 `track.relateGoods`（宿主会把 `/privilege/lite` 的结果写回轨道上），
-  匹配表：`320/hq/level4`、`flac/sq/level5`、`high/hires/level6`、`viper_tape/level101`；
+  匹配表：`320/hq/level4`、`flac/sq/level5`、`high/hires/level6`、`viper_tape/level101`，
+  以及 beta.8 新增的 `viper_clear`（蝰蛇超清）与 `viper_atmos`（蝰蛇全景声）——
+  这两档宿主只按 `quality` 名匹配、不看 `level`（asar 的 `Bf` 逐字如此）；
+- **音质阶梯的顺序必须和宿主一致**：`128 < 320 < flac < high < viper_clear < viper_tape < viper_atmos`
+  （宿主 `PlayerResolver` 的 `Df` 常量）。注意它和宿主设置页下拉框的展示顺序**不同**，
+  降级序列用的是前者；照 UI 的顺序抄会让「自动」选错档；
 - **每种音质对应不同的 hash**，取地址必须用该音质自己的 hash，否则拿到的是别的文件；
 - **只有 128 例外**：它必须用轨道主 hash —— `qualityMatch(entry,'128')` 恒为 true，
   若直接 `find` 会命中数组第一条（可能是 flac 那条），拿到错误的音频（测试里专门放了乱序夹具防回退）。
 
-### 2.3 落盘：宿主没给插件「写任意路径」的能力
+### 2.3 落盘：两条路，按宿主能力自动切换
 
-这是本插件最容易被误解的一点 —— 不是没做，而是三条路都被宿主堵死了（asar 逐字节核验）：
+**beta.10 之前**，宿主把「写任意路径」堵死了（asar 逐字节核验）：
 
 | 通道 | 实际限制 |
 | --- | --- |
@@ -87,16 +93,29 @@ ctx.electron.api.request({ method: 'GET', url: '/song/url', params: { hash, qual
 | `ctx.process.launch` | 只允许启动**插件目录内的 `.exe` / `.com`**，且每次弹窗要用户授权，还会校验 exe 哈希 |
 | 主进程 | 没有注册 `will-download` / `setDownloadPath`，也没有向插件暴露任何「保存对话框」 |
 
-所以插件的做法是：
+所以 1.5.x 及以前只能退化成 `Blob + <a download>` 或 `showSaveFilePicker`，
+并因此吃过「先弹对话框会留下 0 KB 空文件」的亏（1.1.0 的真实反馈）。
 
-```
-主通道   Blob + <a download>  →  交给 Chromium 自身下载行为  →  系统默认下载目录
-可选通道 window.showSaveFilePicker()（File System Access API）→ 用户自选任意位置（仅单曲）
-兜底     「复制直链」→ 交给外部下载器（同时规避 8 MB / 目录限制）
-```
+**beta.10 起**宿主新增了引用式文件授权 + 主进程流式下载（capabilities `localFiles` + `downloads`），
+插件现在优先走新通道，**不需要**调高 `requires.echoMusicVersion` —— 能力是运行时探测的：
 
-「另存为」必须**在用户点击手势内**调用 picker，所以流程是「先弹对话框选位置，再入队下载」，
-而不是下载完再问 —— 后者会因瞬时激活（transient activation）过期而必然失败。
+| 保存方式 | 通道 | 特点 |
+| --- | --- | --- |
+| **下载到指定文件夹**（推荐） | `ctx.fs.requestDirectory` 授权一次 + `ctx.net.download` | 字节由主进程直接写盘：**不进 renderer、无 8 MiB 上限、失败/取消不留半成品**，批量下载也不用逐首弹窗 |
+| 系统下载目录 | `Blob` + `<a download>` | 老宿主 / 未授权时的默认路径 |
+| 选择位置… | `window.showSaveFilePicker` | 仅单曲；必须在用户点击手势内调用 |
+| 复制直链 | 剪贴板 | 交给外部下载器（同时规避一切目录限制） |
+
+几条实现上的硬约束：
+
+- 授权是**引用式**的：持久化的是 `DirectoryRef.id` + 相对路径，**绝不拼绝对路径**
+  （`displayPath` 只用于显示）；相对路径里的越界 / 链接 / Windows 设备名会被宿主拒绝；
+- 撤销授权、换安装来源都会让旧 ID 失效 → 每次下载前用 `listDirectoryGrants()` 校验，
+  失效时明确报「保存文件夹的授权已失效，请在设置里重新选择文件夹」，而不是静默失败；
+- 宿主在 `committing` 阶段才替换最终文件，所以**取消 / 失败不会留下 0 KB 残骸**；
+  重名用 `conflict: 'rename'`，不会覆盖你已有的文件；
+- 老宿主（没有 `ctx.fs.requestDirectory`）**直接不显示这个选项**，不会出现「选了就失败」；
+- 传输有全局配额（活动传输 3 / 单插件 2），所以「同时下载数」仍限制在 1–2。
 
 ### 2.4 风控（安全验证）：不接就会「每一首都失败」
 
@@ -209,8 +228,9 @@ function Pf(hash, quality, ppageId) { return Q.get('/song/url', { params: { hash
 | 下载前弹确认框 | **开** | 关掉后所有下载入口都用下面的默认设置直接开始，不再弹窗 |
 | **复用宿主已解析的播放地址** | **开** | 正在播放的那首歌直接用播放器已解析好的地址（音质跟随播放音质）：不发请求，也就不会触发风控。关掉则一律自己请求上游 |
 | **同步到标题栏「任务中心」** | **开** | 每个下载任务在任务中心占一行（进度条 + 百分比 + 停止/重试/复制直链）；完成后 8 秒自动收起，失败留着 |
-| 默认音质 | 自动（最优可用） | 可固定为 128K / 320K / FLAC / Hi-Res / 母带；不可用时仍会降级 |
-| 保存方式 | 直接下载到系统下载目录 | 或「弹窗询问保存位置（单曲）」；只在关掉确认框后生效 |
+| 默认音质 | 自动（最优可用） | 可固定为 128K / 320K / FLAC / Hi-Res / 蝰蛇超清 / 母带 / 蝰蛇全景声；不可用时仍会降级 |
+| 保存方式 | 直接下载到系统下载目录 | 「下载到指定文件夹」需先授权一次（beta.10+ 才有）；或「弹窗询问保存位置（单曲）」。只在关掉确认框后生效 |
+| 保存文件夹 | （未授权） | 点「选择文件夹」调系统选择器，只需授权一次；之后可在插件管理页「已授权文件与目录」里撤销 |
 | 文件名模板 | `{artist} - {name}` | 支持 `{artist} {name} {album} {quality} {ext} {time}`；非法字符自动清洗 |
 | 分片下载 | 开 | 关掉后只有总进度，没有中间进度与速度 |
 | 分片大小 | 1 MB | 1–8 MB，越大请求次数越少、进度越粗 |
@@ -278,6 +298,10 @@ ctx.ui.mount(hostEl, PlayerBarButton)   // 默认 append 成子节点；{positio
 名不副实（换版本还可能改名），内联 SVG 是唯一稳定的做法。
 
 ### 5.4 「选择位置」必须先解析、再弹保存对话框（0 KB 空文件的根因）
+
+> 用「下载到指定文件夹」（beta.10 的主进程通道）时**不存在这个问题** ——
+> 宿主在 `committing` 阶段才把文件提交到磁盘，失败/取消只会清掉 partial。
+> 这一节讲的是仍然保留的 `showSaveFilePicker` 路线。
 
 `window.showSaveFilePicker()` **一确认就先把 0 字节文件建出来**，真正写入在之后。
 所以 1.1.0 的「先弹对话框再下载」在失败时会留下一堆 0 KB 同名文件（用户真实反馈）。
@@ -349,7 +373,7 @@ const handle = ctx.tasks.register({
 ## 七、测试
 
 ```
-tests/song-downloader.smoke.mjs    无头集成测试（真实 Vue 3 ESM + mock ctx + 假 CDN）451/451 通过
+tests/song-downloader.smoke.mjs    无头集成测试（真实 Vue 3 ESM + mock ctx + 假 CDN）499/499 通过
 tests/song-downloader.mutate.mjs   变异测试（把关键行为改回 bug，确认断言有效）      66/66 被抓到
 ```
 

@@ -392,9 +392,9 @@
 /* 降级提示：宿主一个标签都没给出来时说清楚原因，避免用户以为插件坏了 */
 .etf-hint {
   padding: 0.5rem 0.75rem;
-  border: 1px solid color-mix(in srgb, var(--color-warning, #f59e0b) 32%, transparent);
+  border: 1px solid color-mix(in srgb, var(--state-warning, #f59e0b) 32%, transparent);
   border-radius: 8px;
-  background: color-mix(in srgb, var(--color-warning, #f59e0b) 12%, transparent);
+  background: color-mix(in srgb, var(--state-warning, #f59e0b) 12%, transparent);
   color: var(--color-text-secondary, #6b7280);
   font-size: 0.6875rem;
   line-height: 1.6;

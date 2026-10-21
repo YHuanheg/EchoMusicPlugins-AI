@@ -3,6 +3,20 @@
   "homepage": "https://github.com/YHuanheg/EchoMusicPlugins-AI",
   "plugins": [
     {
+      "id": "bt-volume-memory",
+      "path": "bt-volume-memory",
+      "repo": "https://github.com/YHuanheg/EchoMusicPlugins-AI",
+      "homepage": "https://github.com/YHuanheg/EchoMusicPlugins-AI/tree/main/bt-volume-memory",
+      "tags": [
+        "audio",
+        "volume",
+        "bluetooth",
+        "device",
+        "native-helper",
+        "windows"
+      ]
+    },
+    {
       "id": "gh-accelerator",
       "path": "gh-accelerator",
       "repo": "https://github.com/YHuanheg/EchoMusicPlugins-AI",
